@@ -41,10 +41,59 @@ def load(folder):
             m.ID = name
             m.PARAMS = list(getattr(m, 'PARAMS', []))
             m.CATEGORY = getattr(m, 'CATEGORY', 'Other')
+            m.SCALE = px_keys(m)
             found.append(m)
         except Exception:
             errors.append('%s: %s' % (name, traceback.format_exc(limit=1).strip().splitlines()[-1]))
     return found, errors
+
+
+REF = 900                     # presets were tuned on pictures whose short side is about this many pixels
+PX_KEYS = {'size', 'area', 'dmin', 'dmax', 'rx', 'ry', 'bx', 'by', 'pixel', 'cell', 'radius', 'thick', 'width',
+           'height', 'rowgap'}
+
+
+def px_keys(m):
+    """Settings measured in pixels (they get scaled to the picture size). A file can list them itself in SCALE_KEYS."""
+    if hasattr(m, 'SCALE_KEYS'):
+        return list(m.SCALE_KEYS)
+    out = []
+    for q in m.PARAMS:
+        lab = q['label'].lower()
+        if 'choices' in q or '(x' in lab:
+            continue
+        if ' px' in lab or lab.endswith('px') or q['key'] in PX_KEYS:
+            out.append(q['key'])
+    return out
+
+
+def scale_factor(shape):
+    return max(0.03, min(4.0, min(shape[:2]) / REF))
+
+
+def scale_params(m, p, shape):
+    """Copy of p with every pixel-size setting scaled to a picture of this shape."""
+    f = scale_factor(shape)
+    out = dict(p)
+    if abs(f - 1) < 0.02:
+        return out
+    ints = {q['key']: q.get('int', False) for q in m.PARAMS}
+    lows = {q['key']: q.get('lo', 0) for q in m.PARAMS if 'choices' not in q}
+    for k in getattr(m, 'SCALE', []):
+        if k not in out or not isinstance(out[k], (int, float)):
+            continue
+        v = out[k] * f
+        if ints.get(k):
+            nv = int(round(v))
+            if out[k] != 0 and nv == 0:
+                nv = 1 if out[k] > 0 else -1
+            out[k] = nv
+        else:
+            out[k] = v
+        lo = lows.get(k, 0)
+        if lo > 0 and p[k] >= lo:                     # never below the slider's minimum (pixel art stays pixelated)
+            out[k] = max(out[k], lo)
+    return out
 
 
 def defaults(m):

@@ -27,7 +27,7 @@ def fit_mask(mask, h, w):
     return mask.astype(np.float32)[..., None] / 255
 
 
-def render_frame(base, steps, fx, i, n, seed):
+def render_frame(base, steps, fx, i, n, seed, px=None):
     out = base
     h, w = base.shape[:2]
     t = i / n
@@ -36,7 +36,10 @@ def render_frame(base, steps, fx, i, n, seed):
         if not m:
             continue
         rng = np.random.default_rng(seed + k * 7919 + (i * 104729 if st.get('reroll', True) else 0))
-        res = np.ascontiguousarray(m.apply(out, step_values(m, st, t), rng), np.uint8)
+        vals = step_values(m, st, t)
+        if px:
+            vals = px(m, vals, out.shape)
+        res = np.ascontiguousarray(m.apply(out, vals, rng), np.uint8)
         mk = fit_mask(st.get('mask'), h, w)
         if mk is not None:
             res = (out.astype(np.float32) * (1 - mk) + res.astype(np.float32) * mk + 0.5).astype(np.uint8)

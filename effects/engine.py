@@ -256,7 +256,7 @@ def render(img, p, rng):
     E = ENGINES[p['engine']]
     H, W = img.shape[:2]
     A = W / H
-    fh = E['res']
+    fh = max(32, min(E['res'], H))
     fw = int(round(fh * A))
     if fw > fh * 2.2:
         fw = int(fh * 2.2)

@@ -311,7 +311,7 @@ def apply(img, p, rng):
     q = p['quirk']
     a = img[..., 3:4].astype(np.float32) / 255
     rgb = img[..., :3].astype(np.float32) / 255 * a                       # see-through = black screen
-    nh = max(16, int(round(nh0 * p['res'])))
+    nh = max(16, min(H, int(round(nh0 * p['res']))))            # never more lines than the picture has
     nw = max(16, int(round(min(nw0 * p['res'] * 1.4, nh * W / H))))
     if p['system'] == 'Commodore 64' and q > 0.5:
         hpix = 2

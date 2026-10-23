@@ -1,7 +1,8 @@
 """Glitch Lab window: retro purple bevels, pixel title, canvas with pen pressure, effect panels, layers."""
-import json, math, os, random, time, traceback
+import json, math, os, queue, random, threading, time, traceback
 
 import numpy as np
+from PIL import Image
 from PySide6.QtCore import Qt, QTimer, QRect, QRectF, QPointF, QEvent
 from PySide6.QtGui import (QAction, QBrush, QColor, QFont, QImage, QKeySequence, QPainter, QPen, QPixmap,
                            QPointingDevice, QInputDevice, QShortcut, QIcon)
@@ -347,7 +348,8 @@ class Canvas(QWidget):
         if self.hover is None or not b or not hasattr(b, 'outline'):
             return None
         try:
-            kind, w, h = b.outline(self.win.params[b.ID])
+            pp = self.win.params[b.ID]
+            kind, w, h = b.outline(self.win.px(b, pp, self.doc.mask.shape) if self.doc else pp)
         except Exception:
             return None
         w, h = max(3.0, w * self.s), max(3.0, h * self.s)
@@ -412,7 +414,7 @@ class Canvas(QWidget):
             return
         if w.mask_mode:                                         # any brush paints the mask instead of the layer
             self.doc.push_mask()
-            ctx = effects.Ctx(self.doc.mask, (255, 255, 255), w.erase or eraser, w.params[w.brush.ID], w.rng)
+            ctx = effects.Ctx(self.doc.mask, (255, 255, 255), w.erase or eraser, w.px(w.brush, w.params[w.brush.ID], self.doc.mask.shape), w.rng)
             self.stroke_mask, self.before = True, None
             self.stroke = effects.Stroke(w.brush, ctx)
             self.feed(pos, pr)
@@ -425,7 +427,7 @@ class Canvas(QWidget):
         w.stop_play()
         if getattr(w.brush, 'NEEDS_FILTER', False) and w.gif_mode.isChecked():
             self.gif_cov = np.zeros((self.doc.h, self.doc.w, 4), np.uint8)    # GIF mode: the stroke paints WHERE
-            ctx = effects.Ctx(self.gif_cov, (255, 255, 255), False, w.params[w.brush.ID], w.rng)
+            ctx = effects.Ctx(self.gif_cov, (255, 255, 255), False, w.px(w.brush, w.params[w.brush.ID], self.doc.mask.shape), w.rng)
             ctx.source = np.full_like(self.gif_cov, 255)
             self.stroke_gif, self.stroke_mask, self.before = True, False, None
             self.stroke = effects.Stroke(w.brush, ctx)
@@ -438,7 +440,7 @@ class Canvas(QWidget):
                 return
         self.doc.push_pixels(L)
         self.stroke_mask, self.before = False, self.doc.undo[-1][2]
-        ctx = effects.Ctx(L.arr, w.color, w.erase or eraser, w.params[w.brush.ID], w.rng,
+        ctx = effects.Ctx(L.arr, w.color, w.erase or eraser, w.px(w.brush, w.params[w.brush.ID], self.doc.mask.shape), w.rng,
                           w.cmode, w.palette, w.per_pixel.isChecked(), self.doc.comp)
         ctx.source = src
         self.stroke = effects.Stroke(w.brush, ctx)
@@ -649,6 +651,11 @@ class Win(QMainWindow):
         self.preview_timer = QTimer(self)
         self.preview_timer.setSingleShot(True)
         self.preview_timer.timeout.connect(self.run_preview)
+        self.preview_q = queue.Queue()                  # background preview renders come back here
+        self.preview_thread = None
+        self.preview_pending = None
+        self.preview_gen = 0
+        pt = QTimer(self); pt.timeout.connect(self.poll_preview); pt.start(40)
         self.layer_timer = QTimer(self)
         self.layer_timer.setSingleShot(True)
         self.layer_timer.timeout.connect(lambda: self.canvas.refresh())
@@ -702,6 +709,13 @@ class Win(QMainWindow):
                 h.addSpacing(16)
             else:
                 h.addWidget(self.btn(text, fn, tip))
+        h.addSpacing(16)
+        self.autoscale_btn = self.btn('AUTO-SCALE', self.autoscale_toggled,
+                                      'pixel sizes in brushes, filters and presets follow the picture size\n'
+                                      '(a preset looks the same on a 128 px sprite and a 2500 px drawing)', check=True)
+        self.autoscale_btn.setChecked(True)
+        h.addWidget(self.autoscale_btn)
+        h.addWidget(self.btn('BATCH', self.batch, 'apply the current filter or glitch stack to many pictures at once'))
         h.addStretch(1)
         return f
 
@@ -981,61 +995,165 @@ class Win(QMainWindow):
             self.preview_timer.start(180)
 
     def run_filter(self, src):
-        return self.filter.apply(src, dict(self.params[self.filter.ID]), np.random.default_rng(self.seed))
+        return self.filter.apply(src, self.px(self.filter, self.params[self.filter.ID], src.shape),
+                                 np.random.default_rng(self.seed))
+
+    PREVIEW_PX = 1100                                    # live previews render this big (long side), APPLY renders full size
 
     def run_preview(self):
+        """Live preview: always from the untouched layer, rendered small in the background; never stacks."""
         if not self.doc or not self.filter:
             return
         L = self.doc.layer
         if self.live is None or self.live[0] is not L:
-            self.commit_preview()
-            self.doc.push_pixels(L)
-            self.live = (L, L.arr.copy())
-        self.say('rendering %s...' % self.filter.NAME)
-        QApplication.processEvents()
-        t = time.time()
-        try:
-            out = self.run_filter(self.live[1])
-        except Exception:
-            self.say('filter error: ' + traceback.format_exc(limit=1).splitlines()[-1])
+            self.drop_preview()
+            self.live = (L, L.arr)                      # the untouched layer; previews only ever replace L.arr
+        self.preview_gen += 1
+        job = (self.preview_gen, self.filter, dict(self.params[self.filter.ID]), self.seed, L)
+        if self.preview_thread is not None and self.preview_thread.is_alive():
+            self.preview_pending = job                  # only the newest slider position gets rendered next
             return
-        L.arr = self.doc.masked(self.live[1], np.ascontiguousarray(out, np.uint8))
-        self.fgen += 1
-        self.canvas.refresh()
-        self.touched()
-        self.say('%s preview (%.1fs)%s  APPLY keeps it, Ctrl+Z drops it' %
-                 (self.filter.NAME, time.time() - t, ' inside mask' if self.doc.has_mask else ''))
+        self.start_preview(job)
+
+    def start_preview(self, job):
+        gen, m, params, seed, L = job
+        base = self.live[1]
+        h, w = base.shape[:2]
+        auto = self.autoscale_btn.isChecked()
+        f = min(1.0, self.PREVIEW_PX / max(h, w)) if auto else 1.0
+        small = anim.scaled(base, f) if f < 1 else base.copy()
+        vals = self.px(m, params, small.shape)
+        t0 = time.time()
+
+        def work():
+            try:
+                res, err = np.ascontiguousarray(m.apply(small, vals, np.random.default_rng(seed)), np.uint8), None
+            except Exception:
+                res, err = None, traceback.format_exc(limit=1).splitlines()[-1]
+            self.preview_q.put((gen, L, m.NAME, res, err, time.time() - t0, f < 1))
+        self.preview_thread = threading.Thread(target=work, daemon=True)
+        self.preview_thread.start()
+        self.say('rendering %s preview...' % m.NAME)
+
+    def poll_preview(self):
+        while not self.preview_q.empty():
+            gen, L, name, res, err, dt, reduced = self.preview_q.get()
+            if gen != self.preview_gen or self.live is None or self.live[0] is not L or not self.doc:
+                continue                                # stale: a newer slider position is on its way
+            if err:
+                self.say('filter error: ' + err)
+                continue
+            base = self.live[1]
+            if res.shape[:2] != base.shape[:2]:
+                res = np.asarray(Image.fromarray(res).resize((base.shape[1], base.shape[0]), Image.NEAREST))
+            L.arr = self.doc.masked(base, res)
+            self.canvas.refresh()
+            self.say('%s preview (%.1fs%s)%s  APPLY keeps it (full size), Ctrl+Z drops it' %
+                     (name, dt, ', reduced size' if reduced else '', ' inside mask' if self.doc.has_mask else ''))
+        if self.preview_pending is not None and (self.preview_thread is None or not self.preview_thread.is_alive()):
+            job, self.preview_pending = self.preview_pending, None
+            if job[0] == self.preview_gen and self.live is not None:
+                self.start_preview(job)
+
+    def drop_preview(self):
+        """Throw a live preview away: the layer goes back to exactly what it was."""
+        self.preview_gen += 1
+        self.preview_pending = None
+        if self.live is not None:
+            L, base = self.live
+            self.live = None
+            if L.arr is not base:
+                L.arr = base
+                if self.doc:
+                    self.canvas.refresh()
+            return True
+        return False
 
     def commit_preview(self):
-        self.live = None
+        self.drop_preview()
 
     def apply_filter(self):
         if not self.doc or not self.filter:
             return
         if self.gif_mode.isChecked():
-            if self.live is not None:                           # drop a still preview: in GIF mode it goes in the loop
-                L, base = self.live
-                L.arr = base
-                self.live = None
-                self.canvas.refresh()
+            self.drop_preview()                                  # in GIF mode it goes in the loop instead
             self.gif_add(self.filter, self.params[self.filter.ID])
             return
-        if self.live is not None:
-            self.live = None
-            self.say('%s applied' % self.filter.NAME)
-            return
         L = self.doc.layer
-        self.doc.push_pixels(L)
+        base = self.live[1] if self.live is not None and self.live[0] is L else L.arr
+        self.drop_preview()                                      # layer back to untouched, stale renders ignored
+        self.say('rendering %s at full size...' % self.filter.NAME)
+        QApplication.processEvents()
+        t = time.time()
         try:
-            L.arr = self.doc.masked(L.arr, np.ascontiguousarray(self.run_filter(L.arr), np.uint8))
-            self.fgen += 1
+            out = self.doc.masked(base, np.ascontiguousarray(self.run_filter(base), np.uint8))
         except Exception:
-            self.doc.do_undo(); self.doc.redo.clear()
             self.say('filter error: ' + traceback.format_exc(limit=1).splitlines()[-1])
             return
+        self.doc.push(('pixels', L, base))
+        L.arr = out
+        self.fgen += 1
         self.canvas.refresh()
         self.touched()
-        self.say('%s applied' % self.filter.NAME)
+        self.say('%s applied (%.1fs)' % (self.filter.NAME, time.time() - t))
+
+    def px(self, m, params, shape):
+        """Settings as the effect should see them: pixel sizes scaled to this picture when AUTO-SCALE is on."""
+        if getattr(self, 'autoscale_btn', None) is None or not self.autoscale_btn.isChecked():
+            return dict(params)
+        return effects.scale_params(m, params, shape)
+
+    def autoscale_toggled(self):
+        self.fgen += 1
+        self.canvas.update()
+        if self.doc:
+            f = effects.scale_factor(self.doc.mask.shape)
+            self.say('AUTO-SCALE %s: pixel sizes x%.2f for this %dx%d picture' %
+                     ('on' if self.autoscale_btn.isChecked() else 'off', f if self.autoscale_btn.isChecked() else 1,
+                      self.doc.w, self.doc.h))
+
+    def batch(self):
+        files, _ = QFileDialog.getOpenFileNames(self, 'BATCH: pick the pictures', self.last_dir(),
+                                                'Pictures (*.png *.jpg *.jpeg *.webp *.bmp *.ora)')
+        if not files:
+            return
+        opts = []
+        if self.filter:
+            opts.append('filter: %s (current settings)' % self.filter.NAME)
+        if self.stack:
+            opts.append('glitch stack (%d steps)' % len(self.stack))
+        which, ok = QInputDialog.getItem(self, 'BATCH', 'apply what to %d pictures?' % len(files), opts, 0, False)
+        if not ok:
+            return
+        outdir = QFileDialog.getExistingDirectory(self, 'BATCH: save the results in', os.path.dirname(files[0]))
+        if not outdir:
+            return
+        steps = ([(self.filter, dict(self.params[self.filter.ID]))] if which.startswith('filter') else
+                 [(next(f for f in self.filters if f.ID == s['effect']), s['params']) for s in self.stack
+                  if any(f.ID == s['effect'] for f in self.filters)])
+        done, failed = 0, []
+        for i, path in enumerate(files):
+            self.say('BATCH %d / %d: %s...' % (i + 1, len(files), os.path.basename(path)))
+            QApplication.processEvents()
+            try:
+                d = Document.open(path)
+                d.composite()
+                out = d.comp.copy()
+                for k, (m, prm) in enumerate(steps):
+                    vals = effects.defaults(m)
+                    vals.update({a: b for a, b in prm.items() if a in vals})
+                    out = np.ascontiguousarray(m.apply(out, self.px(m, vals, out.shape),
+                                                       np.random.default_rng(self.seed + k)), np.uint8)
+                stem = os.path.splitext(os.path.basename(path))[0]
+                dst = os.path.join(outdir, stem + '_glitch.png')
+                n = 2
+                while os.path.exists(dst) or os.path.normcase(os.path.abspath(dst)) == os.path.normcase(os.path.abspath(path)):
+                    dst = os.path.join(outdir, '%s_glitch_%d.png' % (stem, n)); n += 1
+                Image.fromarray(out, 'RGBA').save(dst)
+                done += 1
+            except Exception as e:
+                failed.append('%s (%s)' % (os.path.basename(path), e))
+        self.say('BATCH done: %d saved to %s%s' % (done, outdir, ('; failed: ' + ', '.join(failed)) if failed else ''))
 
     def filter_source(self, L):
         """The active layer run through the current filter, cached for the Filter Brush."""
@@ -1076,10 +1194,8 @@ class Win(QMainWindow):
     # ---------------------------------------------------------------- GIF mode
     def gif_toggled(self, on):
         self.stop_play()
-        if on and self.live is not None:
-            self.live[0].arr = self.live[1]
-            self.live = None
-            self.canvas.refresh()
+        if on:
+            self.drop_preview()
         self.show_mode()
         if on:
             self.tabs.setCurrentIndex(0)
@@ -1165,7 +1281,7 @@ class Win(QMainWindow):
         fx = {m.ID: m for m in self.fx}
         n = self.gif_frames.value()
         for i in range(n):
-            yield anim.render_frame(base, self.gif_steps, fx, i, n, self.seed)
+            yield anim.render_frame(base, self.gif_steps, fx, i, n, self.seed, self.px)
 
     def gif_play(self):
         if not self.play_btn.isChecked():
@@ -1344,6 +1460,7 @@ class Win(QMainWindow):
                 continue
             vals = effects.defaults(m)
             vals.update({k: v for k, v in st['params'].items() if k in vals})
+            vals = self.px(m, vals, out.shape)
             self.say('stack %d/%d: %s...' % (i + 1, len(self.stack), m.NAME))
             QApplication.processEvents()
             try:
@@ -1640,14 +1757,16 @@ class Win(QMainWindow):
     def undo(self):
         if self.canvas.stroke or not self.doc:
             return
-        self.live = None
+        if self.drop_preview():
+            self.say('preview dropped')
+            return
         if self.doc.do_undo():
             self.after_history('undo')
 
     def redo(self):
         if self.canvas.stroke or not self.doc:
             return
-        self.live = None
+        self.drop_preview()
         if self.doc.do_redo():
             self.after_history('redo')
 

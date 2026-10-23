@@ -99,6 +99,13 @@ steps to a loop instead. Random effects re-roll every frame (snow crawls, VHS ro
 any slider travel A > B > A so the loop closes, masks keep the movement inside. Preview plays on the canvas;
 export MP4 (ffmpeg, small, Discord-ready) or GIF.
 
+**AUTO-SCALE** (toolbar, on by default): every pixel-size setting (brush sizes, shifts, dot grids, block sizes,
+blur radii...) follows the picture size, so a preset looks the same on a 128 px sprite as on a 2500 px drawing.
+Effect files can say which settings are pixels with `SCALE_KEYS`; otherwise labels ending in *px* are used.
+
+**BATCH** (toolbar): pick any number of pictures, apply the current filter or glitch stack to all of them, each
+scaled to its own size, saved as `name_glitch.png` in a folder you choose. Originals are never touched.
+
 **Preset browser** (BROWSE): every preset as a thumbnail, search, categories, favourites, and *Mine* for your own.
 
 130 presets ship in `presets.json`; **SAVE AS PRESET** adds yours.
