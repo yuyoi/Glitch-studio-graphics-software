@@ -75,6 +75,8 @@ class Ctx:
         self.mode, self.per_pixel = mode, per_pixel
         self.palette = np.array(palette or [color], np.uint8).reshape(-1, 3)
         self.sample = sample if sample is not None else arr          # what 'bust' reads (the visible picture)
+        self.state = {}                                               # per-stroke memory for brushes
+        self.source = None                                            # filtered layer, for NEEDS_FILTER brushes
         self.hue = float(rng.random())
         self.voss = colour.Voss(rng)
         self.drift_base = float(rng.random())

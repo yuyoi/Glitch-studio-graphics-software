@@ -6,14 +6,14 @@ from PySide6.QtCore import Qt, QTimer, QRect, QRectF, QPointF, QEvent
 from PySide6.QtGui import (QAction, QBrush, QColor, QFont, QImage, QKeySequence, QPainter, QPen, QPixmap,
                            QPointingDevice, QInputDevice, QShortcut, QIcon)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox, QFileDialog, QFrame, QGridLayout,
-                               QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem, QMainWindow,
+                               QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem, QMainWindow, QTabWidget,
                                QMessageBox, QPushButton, QScrollArea, QSlider, QVBoxLayout, QWidget, QButtonGroup)
 
 from . import effects
 from .doc import Document
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VERSION = '0.1'
+VERSION = '0.2'
 
 # ---------------------------------------------------------------- look
 C = dict(bg='#160e20', panel='#24183a', hi='#a77ae0', lo='#07040c', face='#34234f', text='#e8d8ff',
@@ -43,6 +43,10 @@ QScrollArea {{ border: none; background: transparent; }}
 QScrollBar:vertical {{ background: {lo}; width: 12px; }}
 QScrollBar::handle:vertical {{ background: {face}; border: 2px solid; border-color: {hi} {lo} {lo} {hi}; }}
 QLabel#status {{ background: {lo}; color: {green}; padding: 3px 6px; border-top: 2px solid {sel}; }}
+QTabWidget::pane {{ border: none; }}
+QTabBar::tab {{ background: {face}; border: 2px solid; border-color: {hi} {lo} {lo} {hi}; padding: 3px 12px; }}
+QTabBar::tab:selected {{ background: {sel}; color: #ffffff; }}
+QPushButton#mask:checked {{ color: {pink}; }}
 """.format(**C)
 
 
@@ -213,6 +217,8 @@ class Canvas(QWidget):
         self.img = None
         self.s, self.ox, self.oy = 1.0, 0.0, 0.0
         self.stroke = None
+        self.stroke_mask = False
+        self.before = None
         self.pan = None
         self.space = False
         self.last_tablet = 0.0
@@ -237,6 +243,7 @@ class Canvas(QWidget):
     def set_doc(self, doc):
         self.doc = doc
         self.img = QImage(doc.comp.data, doc.w, doc.h, doc.w * 4, QImage.Format.Format_RGBA8888)
+        self.mimg = QImage(doc.overlay.data, doc.w, doc.h, doc.w * 4, QImage.Format.Format_RGBA8888)
         self.fit()
 
     def fit(self):
@@ -291,6 +298,8 @@ class Canvas(QWidget):
         p.fillRect(tgt, self.checker)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, s < 1)
         p.drawImage(tgt, self.img, QRectF(sx0, sy0, sx1 - sx0, sy1 - sy0))
+        if d.has_mask and self.win.show_mask.isChecked():
+            p.drawImage(tgt, self.mimg, QRectF(sx0, sy0, sx1 - sx0, sy1 - sy0))
         p.setClipping(False)
         p.setPen(QPen(QColor(C['sel']), 1))
         p.drawRect(cr.adjusted(-1, -1, 0, 0))
@@ -365,15 +374,32 @@ class Canvas(QWidget):
         w = self.win
         if not self.doc or not w.brush:
             return
+        w.commit_preview()
+        if w.mask_pick:                                         # BY COLOUR: one click selects that colour
+            w.mask_by_colour(self.to_doc(pos))
+            return
+        if w.mask_mode:                                         # any brush paints the mask instead of the layer
+            self.doc.push_mask()
+            ctx = effects.Ctx(self.doc.mask, (255, 255, 255), w.erase or eraser, w.params[w.brush.ID], w.rng)
+            self.stroke_mask, self.before = True, None
+            self.stroke = effects.Stroke(w.brush, ctx)
+            self.feed(pos, pr)
+            return
         L = self.doc.layer
         if not L.visible:
             w.say('active layer is hidden'); return
-        w.commit_preview()
         if (w.erase or eraser or getattr(w.brush, 'NEEDS_PIXELS', False)) and not L.arr[..., 3].any():
             w.say('"%s" is empty: erasing / slipping needs a layer with picture on it' % L.name)
+        src = None
+        if getattr(w.brush, 'NEEDS_FILTER', False):
+            src = w.filter_source(L)
+            if src is None:
+                return
         self.doc.push_pixels(L)
+        self.stroke_mask, self.before = False, self.doc.undo[-1][2]
         ctx = effects.Ctx(L.arr, w.color, w.erase or eraser, w.params[w.brush.ID], w.rng,
                           w.cmode, w.palette, w.per_pixel.isChecked(), self.doc.comp)
+        ctx.source = src
         self.stroke = effects.Stroke(w.brush, ctx)
         self.feed(pos, pr)
 
@@ -389,9 +415,17 @@ class Canvas(QWidget):
 
     def flush(self):
         ctx = self.stroke.ctx
-        if ctx.dirty:
-            self.refresh(ctx.dirty)
-            ctx.dirty = None
+        if not ctx.dirty:
+            return
+        x0, y0, x1, y1 = (int(v) for v in ctx.dirty)
+        if self.stroke_mask:
+            self.doc.mask_changed(ctx.dirty)
+        elif self.doc.has_mask and self.win.mask_brushes.isChecked() and self.before is not None:
+            m = self.doc.mask[y0:y1, x0:x1, 3:4].astype(np.float32) / 255     # strokes only land inside the mask
+            r = ctx.arr[y0:y1, x0:x1]
+            r[:] = (self.before[y0:y1, x0:x1] * (1 - m) + r * m + 0.5).astype(np.uint8)
+        self.refresh(ctx.dirty)
+        ctx.dirty = None
 
     def finish(self):
         if not self.stroke:
@@ -401,7 +435,12 @@ class Canvas(QWidget):
             self.flush()
         except Exception:
             self.win.say('brush error: ' + traceback.format_exc(limit=1).splitlines()[-1])
+        if self.stroke_mask:
+            self.doc.mask_changed()
+        elif not getattr(self.win.brush, 'NEEDS_FILTER', False):
+            self.win.fgen += 1                                  # layer changed: filter brush re-renders next time
         self.stroke = None
+        self.before = None
         self.win.touched()
 
     # ---- input
@@ -497,7 +536,8 @@ class Win(QMainWindow):
         self.fx, errs = effects.load(os.path.join(HERE, 'effects'))
         self.brushes = [m for m in self.fx if m.KIND == 'brush']
         self.filters = [m for m in self.fx if m.KIND == 'filter']
-        order = ['dotline', 'speckle', 'staticbrush', 'blockbrush', 'rowslip', 'pixelpen']           # nice order, new ones go after
+        order = ['dotline', 'speckle', 'staticbrush', 'blockbrush', 'filterbrush', 'stretch', 'mosaic', 'hueshift',
+                 'rowslip', 'pixelpen']           # nice order, new ones go after
         self.brushes.sort(key=lambda m: order.index(m.ID) if m.ID in order else 99)
         self.params = {m.ID: effects.defaults(m) for m in self.fx}
         self.brush = self.brushes[0] if self.brushes else None
@@ -509,6 +549,11 @@ class Win(QMainWindow):
         self.seed = 1
         self.rng = np.random.default_rng()
         self.live = None                                                # (layer, untouched copy) while previewing
+        self.mask_mode = False                                          # M: brushes paint the selection mask
+        self.mask_pick = False                                          # next click selects by colour
+        self.stack = []                                                 # glitch stack: [{effect, params}, ...]
+        self.fgen = 0                                                   # bumps when the layer changes (filter brush cache)
+        self.fcache = None
         self.dirty = False
         self.doc = None
 
@@ -550,7 +595,7 @@ class Win(QMainWindow):
                          ('[', lambda: self.size_step(1 / 1.2)), (']', lambda: self.size_step(1.2)),
                          ('F', self.canvas.fit), ('1', self.zoom100), ('Ctrl+Return', self.apply_filter),
                          ('+', lambda: self.zoom_step(1.5)), ('=', lambda: self.zoom_step(1.5)),
-                         ('-', lambda: self.zoom_step(1 / 1.5))):
+                         ('-', lambda: self.zoom_step(1 / 1.5)), ('M', self.toggle_mask_mode)):
             QShortcut(QKeySequence(keys), self, fn)
 
         self.load_presets()
@@ -610,12 +655,15 @@ class Win(QMainWindow):
         v.addWidget(sect('BRUSHES'))
         self.brush_group = QButtonGroup(self)
         self.brush_btns = {}
-        for m in self.brushes:
+        grid = QGridLayout()
+        grid.setSpacing(3)
+        for i, m in enumerate(self.brushes):
             b = self.btn(m.NAME.upper(), None, (m.__doc__ or '').strip(), check=True)
             b.clicked.connect(lambda _=False, m=m: self.pick_brush(m))
             self.brush_group.addButton(b)
             self.brush_btns[m.ID] = b
-            v.addWidget(b)
+            grid.addWidget(b, i // 2, i % 2)
+        v.addLayout(grid)
         row = QHBoxLayout()
         self.color_btn = self.btn('', self.pick_color, 'paint colour')
         self.color_btn.setFixedWidth(60)
@@ -665,15 +713,21 @@ class Win(QMainWindow):
         return s
 
     def build_right(self):
-        f, v = panel()
-        f.setFixedWidth(280)
-        v.addWidget(sect('FILTERS  (whole layer)'))
+        f, outer = panel()
+        f.setFixedWidth(290)
+        self.tabs = QTabWidget()
+        outer.addWidget(self.tabs, 1)
+        ftab = QWidget()
+        v = QVBoxLayout(ftab)
+        v.setContentsMargins(0, 4, 0, 0)
+        v.setSpacing(4)
+        self.tabs.addTab(ftab, 'FILTERS')
         self.filter_list = QListWidget()
         for m in self.filters:
             it = QListWidgetItem(m.NAME.upper())
             it.setToolTip((m.__doc__ or '').strip())
             self.filter_list.addItem(it)
-        self.filter_list.setFixedHeight(min(300, 24 * max(1, len(self.filters)) + 8))
+        self.filter_list.setFixedHeight(min(230, 24 * max(1, len(self.filters)) + 8))
         self.filter_list.currentRowChanged.connect(lambda i: 0 <= i < len(self.filters) and self.pick_filter(self.filters[i]))
         v.addWidget(self.filter_list)
         self.filter_params = Params(self.filter_changed)
@@ -684,12 +738,62 @@ class Win(QMainWindow):
         self.live_box.setToolTip('preview while you move the sliders (Ctrl+Z drops it)')
         row.addWidget(self.live_box)
         row.addWidget(self.btn('RESEED', self.reseed, 'new random pattern'))
+        row.addWidget(self.btn('+STACK', self.stack_add, 'add this filter with these settings to the glitch stack'))
         row.addWidget(self.btn('APPLY', self.apply_filter, 'Ctrl+Enter'), 1)
         v.addLayout(row)
-        v.addSpacing(6)
+
+        stab = QWidget()
+        sv = QVBoxLayout(stab)
+        sv.setContentsMargins(0, 4, 0, 0)
+        sv.setSpacing(4)
+        self.tabs.addTab(stab, 'GLITCH STACK')
+        sv.addWidget(QLabel('runs top to bottom = one undo.\n+STACK (FILTERS tab) adds steps.'))
+        self.stack_list = QListWidget()
+        sv.addWidget(self.stack_list, 1)
+        row = QHBoxLayout()
+        for text, fn, tip in (('\u25b2', lambda: self.stack_move(-1), 'move up'), ('\u25bc', lambda: self.stack_move(1), 'move down'),
+                              ('DEL', self.stack_del, 'remove step'), ('CLEAR', self.stack_clear, 'empty the stack'),
+                              ('EDIT', self.stack_edit, 'load this step into the FILTERS tab')):
+            row.addWidget(self.btn(text, fn, tip))
+        sv.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(self.btn('SAVE STACK', self.save_stack, 'save as a preset'))
+        row.addWidget(self.btn('RUN STACK', self.run_stack, 'apply every step to the active layer'), 1)
+        sv.addLayout(row)
+
+        v = outer
+        v.addWidget(sect('MASK  (effects stay inside)'))
+        row = QHBoxLayout()
+        self.mask_btn = self.btn('PAINT MASK', self.toggle_mask_mode, 'M: brushes paint the mask (erase removes)', check=True)
+        self.mask_btn.setObjectName('mask')
+        row.addWidget(self.mask_btn, 1)
+        row.addWidget(self.btn('BY COLOUR', self.mask_pick_arm, 'then click a colour on the canvas: adds all similar colours'))
+        v.addLayout(row)
+        row = QHBoxLayout()
+        for text, fn, tip in (('ALL', self.mask_all, 'select everything'), ('INVERT', self.mask_invert, 'swap inside / outside'),
+                              ('CLEAR', self.mask_clear, 'no mask: everything is affected')):
+            row.addWidget(self.btn(text, fn, tip))
+        v.addLayout(row)
+        row = QHBoxLayout()
+        self.show_mask = QCheckBox('SHOW')
+        self.show_mask.setChecked(True)
+        self.show_mask.toggled.connect(lambda _: self.canvas.update())
+        self.mask_brushes = QCheckBox('LIMITS BRUSHES')
+        self.mask_brushes.setChecked(True)
+        self.mask_tol = QSlider(Qt.Horizontal)
+        self.mask_tol.setRange(1, 60)
+        self.mask_tol.setValue(12)
+        self.mask_tol.setToolTip('BY COLOUR tolerance')
+        for wdg in (self.show_mask, self.mask_brushes):
+            wdg.setFocusPolicy(Qt.NoFocus)
+            row.addWidget(wdg)
+        row.addWidget(QLabel('TOL'))
+        row.addWidget(self.mask_tol, 1)
+        v.addLayout(row)
+        v.addSpacing(4)
         v.addWidget(sect('LAYERS'))
         self.layer_list = QListWidget()
-        self.layer_list.setFixedHeight(170)
+        self.layer_list.setFixedHeight(120)
         self.layer_list.currentRowChanged.connect(self.pick_layer)
         self.layer_list.itemChanged.connect(self.layer_edited)
         v.addWidget(self.layer_list)
@@ -778,10 +882,12 @@ class Win(QMainWindow):
         except Exception:
             self.say('filter error: ' + traceback.format_exc(limit=1).splitlines()[-1])
             return
-        L.arr = np.ascontiguousarray(out, np.uint8)
+        L.arr = self.doc.masked(self.live[1], np.ascontiguousarray(out, np.uint8))
+        self.fgen += 1
         self.canvas.refresh()
         self.touched()
-        self.say('%s preview (%.1fs)  APPLY keeps it, Ctrl+Z drops it' % (self.filter.NAME, time.time() - t))
+        self.say('%s preview (%.1fs)%s  APPLY keeps it, Ctrl+Z drops it' %
+                 (self.filter.NAME, time.time() - t, ' inside mask' if self.doc.has_mask else ''))
 
     def commit_preview(self):
         self.live = None
@@ -796,7 +902,8 @@ class Win(QMainWindow):
         L = self.doc.layer
         self.doc.push_pixels(L)
         try:
-            L.arr = np.ascontiguousarray(self.run_filter(L.arr), np.uint8)
+            L.arr = self.doc.masked(L.arr, np.ascontiguousarray(self.run_filter(L.arr), np.uint8))
+            self.fgen += 1
         except Exception:
             self.doc.do_undo(); self.doc.redo.clear()
             self.say('filter error: ' + traceback.format_exc(limit=1).splitlines()[-1])
@@ -804,6 +911,159 @@ class Win(QMainWindow):
         self.canvas.refresh()
         self.touched()
         self.say('%s applied' % self.filter.NAME)
+
+    def filter_source(self, L):
+        """The active layer run through the current filter, cached for the Filter Brush."""
+        if not self.filter:
+            return None
+        key = (self.filter.ID, json.dumps(self.params[self.filter.ID], sort_keys=True), self.seed, id(L), self.fgen)
+        if self.fcache and self.fcache[0] == key:
+            return self.fcache[1]
+        self.say('rendering %s for the filter brush...' % self.filter.NAME)
+        QApplication.processEvents()
+        try:
+            src = np.ascontiguousarray(self.run_filter(L.arr), np.uint8)
+        except Exception:
+            self.say('filter error: ' + traceback.format_exc(limit=1).splitlines()[-1])
+            return None
+        self.fcache = (key, src)
+        self.say('filter brush paints: %s (change it on the FILTERS tab)' % self.filter.NAME)
+        return src
+
+    # ---------------------------------------------------------------- mask
+    def toggle_mask_mode(self):
+        self.mask_mode = not self.mask_mode
+        self.mask_pick = False
+        self.mask_btn.setChecked(self.mask_mode)
+        self.show_mode()
+        self.say('MASK MODE: brushes paint the mask, erase removes it. M to go back' if self.mask_mode
+                 else 'painting the layer again')
+
+    def show_mode(self):
+        self.title.mode = ('MASK ' if self.mask_mode else '') + ('ERASE' if self.erase else 'PAINT')
+        self.paint_status()
+
+    def mask_edit(self, fn, what):
+        if not self.doc:
+            return
+        self.commit_preview()
+        self.doc.push_mask()
+        fn(self.doc.mask[..., 3])
+        self.doc.mask_changed()
+        self.canvas.update()
+        self.touched()
+        self.say(what)
+
+    def mask_all(self):
+        self.mask_edit(lambda m: m.fill(255), 'mask: everything')
+
+    def mask_clear(self):
+        self.mask_edit(lambda m: m.fill(0), 'mask cleared: filters and brushes hit everything')
+
+    def mask_invert(self):
+        self.mask_edit(lambda m: np.subtract(255, m, out=m), 'mask inverted')
+
+    def mask_pick_arm(self):
+        self.mask_pick = True
+        self.say('BY COLOUR: click a colour on the canvas (adds every similar colour to the mask)')
+
+    def mask_by_colour(self, xy):
+        self.mask_pick = False
+        d = self.doc
+        x, y = int(np.clip(xy[0], 0, d.w - 1)), int(np.clip(xy[1], 0, d.h - 1))
+        c = d.comp[y, x, :3].astype(np.int16)
+        dist = np.abs(d.comp[..., :3].astype(np.int16) - c).sum(-1)
+        hit = (dist <= self.mask_tol.value() / 100 * 765) & (d.comp[..., 3] > 0)
+        self.mask_edit(lambda m: np.maximum(m, hit.astype(np.uint8) * 255, out=m),
+                       'mask: added %d pixels like rgb%s' % (int(hit.sum()), tuple(int(v) for v in c)))
+
+    # ---------------------------------------------------------------- glitch stack
+    def stack_add(self):
+        if not self.filter:
+            return
+        self.stack.append(dict(effect=self.filter.ID, params=dict(self.params[self.filter.ID])))
+        self.sync_stack()
+        self.say('stack: added %s (%d steps)' % (self.filter.NAME, len(self.stack)))
+
+    def sync_stack(self):
+        names = {m.ID: m.NAME for m in self.fx}
+        self.stack_list.clear()
+        for i, st in enumerate(self.stack):
+            self.stack_list.addItem('%d. %s' % (i + 1, names.get(st['effect'], st['effect'] + ' (missing)')))
+
+    def stack_move(self, d):
+        i = self.stack_list.currentRow()
+        j = i + d
+        if 0 <= i < len(self.stack) and 0 <= j < len(self.stack):
+            self.stack[i], self.stack[j] = self.stack[j], self.stack[i]
+            self.sync_stack()
+            self.stack_list.setCurrentRow(j)
+
+    def stack_del(self):
+        i = self.stack_list.currentRow()
+        if 0 <= i < len(self.stack):
+            del self.stack[i]
+            self.sync_stack()
+
+    def stack_clear(self):
+        self.stack = []
+        self.sync_stack()
+
+    def stack_edit(self):
+        i = self.stack_list.currentRow()
+        if not 0 <= i < len(self.stack):
+            return
+        st = self.stack[i]
+        m = next((m for m in self.filters if m.ID == st['effect']), None)
+        if m:
+            self.params[m.ID].update(st['params'])
+            self.pick_filter(m)
+            self.filter_params.set_values(self.params[m.ID])
+            self.tabs.setCurrentIndex(0)
+            self.say('editing step %d: change it, then +STACK adds the new version (DEL the old one)' % (i + 1))
+
+    def run_stack(self):
+        if not self.doc or not self.stack:
+            self.say('the stack is empty: pick a filter, set it up, press +STACK')
+            return
+        self.commit_preview()
+        fx = {m.ID: m for m in self.filters}
+        L = self.doc.layer
+        base = L.arr
+        self.doc.push_pixels(L)
+        out = base
+        t = time.time()
+        for i, st in enumerate(self.stack):
+            m = fx.get(st['effect'])
+            if not m:
+                continue
+            vals = effects.defaults(m)
+            vals.update({k: v for k, v in st['params'].items() if k in vals})
+            self.say('stack %d/%d: %s...' % (i + 1, len(self.stack), m.NAME))
+            QApplication.processEvents()
+            try:
+                out = np.ascontiguousarray(m.apply(out, vals, np.random.default_rng(self.seed + i)), np.uint8)
+            except Exception:
+                self.say('stack step %d (%s) failed: %s' % (i + 1, m.NAME, traceback.format_exc(limit=1).splitlines()[-1]))
+                L.arr = base
+                self.doc.undo.pop()
+                return
+        L.arr = self.doc.masked(base, out)
+        self.fgen += 1
+        self.canvas.refresh()
+        self.touched()
+        self.say('stack done: %d steps in %.1fs%s' % (len(self.stack), time.time() - t,
+                                                      ' inside mask' if self.doc.has_mask else ''))
+
+    def save_stack(self):
+        if not self.stack:
+            return
+        name, ok = QInputDialog.getText(self, 'save stack', 'stack name')
+        if ok and name.strip():
+            pr = dict(name=name.strip(), effect='__stack__', stack=[dict(s) for s in self.stack])
+            self.presets = [p for p in self.presets if not (p['name'] == pr['name'] and p['effect'] == '__stack__')] + [pr]
+            self.write_presets()
+            self.say('stack saved: ' + pr['name'])
 
     def reseed(self):
         self.seed += 1
@@ -839,8 +1099,7 @@ class Win(QMainWindow):
         self.erase = not self.erase
         self.erase_btn.setChecked(self.erase)
         self.erase_btn.setText('ERASE' if self.erase else 'PAINT')
-        self.title.mode = 'ERASE' if self.erase else 'PAINT'
-        self.paint_status()
+        self.show_mode()
 
     def pick_color(self):
         c = QColorDialog.getColor(QColor(*self.color), self, 'paint colour')
@@ -905,10 +1164,19 @@ class Win(QMainWindow):
                 if m and m.KIND == kind:
                     self.preset_box.addItem('%s  %s  (%s)' % ('✎' if kind == 'brush' else '✦', pr['name'], m.NAME),
                                             pr)
+        for pr in self.presets:
+            if pr.get('effect') == '__stack__' and all(s['effect'] in ids for s in pr.get('stack', [])):
+                self.preset_box.addItem('☰  %s  (stack: %s)' % (pr['name'], ' > '.join(ids[s['effect']].NAME for s in pr['stack'])), pr)
 
     def pick_preset(self, i):
         pr = self.preset_box.itemData(i)
         if not pr:
+            return
+        if pr.get('effect') == '__stack__':
+            self.stack = [dict(effect=s['effect'], params=dict(s.get('params', {}))) for s in pr['stack']]
+            self.sync_stack()
+            self.tabs.setCurrentIndex(1)
+            self.say('stack loaded: %s (%d steps), press RUN STACK' % (pr['name'], len(self.stack)))
             return
         m = next((m for m in self.fx if m.ID == pr['effect']), None)
         if not m:
@@ -951,12 +1219,15 @@ class Win(QMainWindow):
             pr['cmode'] = self.cmode
             pr['per_pixel'] = self.per_pixel.isChecked()
         self.presets = [p for p in self.presets if not (p['name'] == pr['name'] and p['effect'] == m.ID)] + [pr]
+        self.write_presets()
+        self.say('preset saved: ' + pr['name'])
+
+    def write_presets(self):
         tmp = self.preset_path() + '.tmp'
         with open(tmp, 'w', encoding='utf-8') as fh:
-            json.dump(self.presets, fh, indent=1)
+            fh.write('[\n' + ',\n'.join(' ' + json.dumps(p) for p in self.presets) + '\n]\n')
         os.replace(tmp, self.preset_path())
         self.load_presets()
-        self.say('preset saved: ' + pr['name'])
 
     # ---------------------------------------------------------------- layers
     def sync_layers(self):
@@ -1064,6 +1335,7 @@ class Win(QMainWindow):
             self.after_history('redo')
 
     def after_history(self, what):
+        self.fgen += 1
         self.sync_layers()
         self.canvas.refresh()
         self.touched()
@@ -1078,6 +1350,8 @@ class Win(QMainWindow):
     def set_doc(self, doc):
         self.doc = doc
         self.live = None
+        self.fgen += 1
+        self.mask_mode = False
         self.canvas.set_doc(doc)
         self.sync_layers()
         self.dirty = False

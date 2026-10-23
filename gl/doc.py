@@ -25,6 +25,10 @@ class Document:
         self.path = None                    # last ORA saved by Glitch Lab (Ctrl+S re-saves here)
         self.undo, self.redo = [], []
         self.comp = np.zeros((h, w, 4), np.uint8)
+        self.mask = np.zeros((h, w, 4), np.uint8)       # selection: alpha channel only (brushes paint it like a layer)
+        self.overlay = np.zeros((h, w, 4), np.uint8)    # pink tint shown over the canvas where the mask is
+        self.overlay[..., 0], self.overlay[..., 1], self.overlay[..., 2] = 255, 40, 200
+        self.has_mask = False
 
     # ---------- layers ----------
     @property
@@ -64,10 +68,34 @@ class Document:
     def push_pixels(self, layer):
         self.push(('pixels', layer, layer.arr.copy()))
 
+    def push_mask(self):
+        self.push(('mask', self.mask[..., 3].copy()))
+
+    def mask_changed(self, rect=None):
+        x0, y0, x1, y1 = rect or (0, 0, self.w, self.h)
+        x0, y0, x1, y1 = max(0, int(x0)), max(0, int(y0)), min(self.w, int(x1)), min(self.h, int(y1))
+        self.overlay[y0:y1, x0:x1, 3] = self.mask[y0:y1, x0:x1, 3] // 2
+        if rect is None:
+            self.has_mask = bool(self.mask[..., 3].any())
+        elif not self.has_mask:
+            self.has_mask = bool(self.mask[y0:y1, x0:x1, 3].any())
+
+    def masked(self, before, after):
+        """Blend a filter result into the layer only where the mask is (whole layer if there is no mask)."""
+        if not self.has_mask:
+            return after
+        m = self.mask[..., 3:4].astype(np.float32) / 255
+        return (before.astype(np.float32) * (1 - m) + after.astype(np.float32) * m + 0.5).astype(np.uint8)
+
     def push_stack(self):
         self.push(('stack', list(self.layers), self.active))
 
     def _swap(self, entry):
+        if entry[0] == 'mask':
+            cur = self.mask[..., 3].copy()
+            self.mask[..., 3] = entry[1]
+            self.mask_changed()
+            return ('mask', cur)
         if entry[0] == 'pixels':
             _, L, old = entry
             cur, L.arr = L.arr, old

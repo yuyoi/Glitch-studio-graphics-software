@@ -28,6 +28,10 @@ so adding the next glitch you find is a 10-line job.
 | **Speckle** | a fresh random scatter of square specks on every dab (never smears); scatter = random, **blue noise**, **sunflower** (golden angle), clumps |
 | **Static** | paints TV snow (circle, square or scan band) |
 | **Block Brush** | paints broken digital video: DCT-crushed blocks, wrong-place copies, drag-down smears |
+| **Filter Brush** | paints in whatever filter is selected (pixel sort, VHS, Turing, Colour Rip...) only where the pen goes |
+| **Stretch Brush** | grabs the line of pixels under the pen and drags it along the stroke (frozen-scanline smear) |
+| **Mosaic** | pixelates under the brush on one fixed block grid |
+| **Hue Shift** | spins the colours under the brush around the colour wheel, more each pass |
 | **Row Slip** | slides thin bands of the picture sideways (pick one channel for an RGB tear) |
 | **Pixel Pen** | plain hard pixel pen / eraser for cleanup |
 
@@ -50,11 +54,26 @@ torn off a nearby spot and hue-spun), **golden** (golden-ratio hue steps: the mo
 | **VHS / Cable** | 1/f line wobble, colour bleed, tracking bands, head-switch tear, interlace comb, tape fade |
 | **Colour Bars** | SMPTE / EBU / RGB ramp test cards: behind, over, or torn in as slices |
 | **Block Rot** | real JPEG maths: 8×8 DCT quantisation (colour crushed harder) + broken macroblocks |
+| **CRT** | curved glass, RGB phosphor mask (aperture grille / shadow / slot), scanlines, bloom, edge fringe, vignette |
+| **Halftone** | CMYK print screens at 15/75/0/45°, mono newspaper dots, or dots in each spot's own colour |
+| **ASCII** | rebuilt from text characters by glyph ink: green/amber terminal, real colours or 16-colour ANSI |
+| **Wave Melt** | sine waves with 1/f wobble, melting drips, swirl, ripple |
+| **Databend** | edits the raw bytes: inserted/deleted bytes skew the image and rotate R>G>B, bit flips, echo runs, the WordPad save |
+| **Pixel Stretch** | each column smears from where it gets bright (or dark) to the edge |
+| **Kaleidoscope** | N mirrored wedges around a point: mandalas and snowflakes |
+| **Neon Edges** | Sobel edges coloured by the direction they run, plus glow |
 | **Pixel Sort**, **RGB Shift**, **Scanlines**, **Dither** (Bayer, Game Boy), **JPEG Crush**, **Slice Shift** | the classics |
 
 <p align="center"><img src="assets/filters.png" width="860" alt="Filter presets applied to the test picture"></p>
 
-57 presets ship in `presets.json`; **SAVE CURRENT AS PRESET** adds yours.
+**Mask**: press **M** (or PAINT MASK) and any brush paints a selection instead of the picture; **BY COLOUR** then a
+click grabs every similar colour. Filters, stacks and brushes then only touch the inside (pink tint shows it).
+INVERT / ALL / CLEAR, and it's all undoable.
+
+**Glitch stacks**: set up a filter, press **+STACK**, repeat; **RUN STACK** applies the whole chain as one undo step.
+Save stacks as presets (*Broadcast Death*, *Zine Print*, *Hacker Terminal*, *Corrupted Download*, *Melted Tape* ship).
+
+91 presets ship in `presets.json`; **SAVE CURRENT AS PRESET** adds yours.
 
 ## Install and run
 
@@ -68,7 +87,7 @@ python glitchlab.py            (or double-click "Glitch Lab.bat", or drag a PNG 
 - Opens PNG / JPG / **ORA** (layers kept). Saves layered **.ora**, which Krita opens with every layer intact.
   **Export PNG** writes a flat copy. It never overwrites the file you opened, and autosaves every 3 minutes.
 - Pen: Windows Ink tablets (pressure + eraser end). Mouse works too. Fingers pan, two fingers pinch-zoom.
-- Keys: **E** paint/erase, **[ ]** brush size, **+ / -** zoom, wheel zoom, space-drag pan, **F** fit, **1** 100%,
+- Keys: **E** paint/erase, **M** mask mode, **[ ]** brush size, **+ / -** zoom, wheel zoom, space-drag pan, **F** fit, **1** 100%,
   **Ctrl+Z / Ctrl+Y** undo/redo, **Ctrl+Enter** apply filter, **Ctrl+S** save.
 
 `glitch_tex.py` / `glitch.bat` is the original command-line dropout texture: drag PNG layers onto the .bat.
