@@ -1,0 +1,17 @@
+# Whitelist: nothing goes in unless listed here (keeps drawings, autosaves and test files out)
+/*
+!/.gitignore
+!/README.md
+!/LICENSE
+!/requirements.txt
+!/glitchlab.py
+!/Glitch Lab.bat
+!/glitch_lab.ico
+!/presets.json
+!/glitch_tex.py
+!/glitch.bat
+!/gl/
+!/effects/
+!/assets/
+__pycache__/
+*.pyc
