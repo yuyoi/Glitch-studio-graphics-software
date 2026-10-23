@@ -4,6 +4,7 @@ import numpy as np
 
 NAME = 'Stretch Brush'
 KIND = 'brush'
+CATEGORY = 'Distort'
 NEEDS_PIXELS = True
 PARAMS = [
     P('size', 'GRAB LENGTH px', 4, 1200, 200),

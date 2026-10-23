@@ -11,6 +11,7 @@ from PIL import Image, ImageFilter
 
 NAME = 'Colour Rip'
 KIND = 'filter'
+CATEGORY = 'Print'
 PARAMS = [
     P('plates', 'PLATES (colours)', 2, 12, 6),
     P('shift', 'MISREGISTER px', 0, 40, 4),

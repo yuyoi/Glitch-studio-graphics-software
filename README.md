@@ -61,6 +61,9 @@ torn off a nearby spot and hue-spun), **golden** (golden-ratio hue steps: the mo
 | **Databend** | edits the raw bytes: inserted/deleted bytes skew the image and rotate R>G>B, bit flips, echo runs, the WordPad save |
 | **Pixel Stretch** | each column smears from where it gets bright (or dark) to the edge |
 | **Kaleidoscope** | N mirrored wedges around a point: mandalas and snowflakes |
+| **Game Engine** | your picture inside a PS1 / N64 / PS2 3D scene (see below) |
+| **Pixel Art** | smart pixelation: dominant colour per block, lines kept |
+| **Console** | 17 games machines + the screen they were played on (see below) |
 | **Neon Edges** | Sobel edges coloured by the direction they run, plus glow |
 | **Pixel Sort**, **RGB Shift**, **Scanlines**, **Dither** (Bayer, Game Boy), **JPEG Crush**, **Slice Shift** | the classics |
 
@@ -73,7 +76,32 @@ INVERT / ALL / CLEAR, and it's all undoable.
 **Glitch stacks**: set up a filter, press **+STACK**, repeat; **RUN STACK** applies the whole chain as one undo step.
 Save stacks as presets (*Broadcast Death*, *Zine Print*, *Hacker Terminal*, *Corrupted Download*, *Melted Tape* ship).
 
-91 presets ship in `presets.json`; **SAVE CURRENT AS PRESET** adds yours.
+**Console**: renders the picture the way a machine would, then shows it on the screen it was played on. 17 systems
+(NES, Game Boy / Color / Advance, Master System, Mega Drive, SNES, PlayStation, N64, PS2, Xbox 360, Dreamcast,
+Atari 2600, C64, DOS CGA / VGA, Virtual Boy): real resolution, palette or colour depth, dithering and one signature
+quirk each (NES tile clash + sprite flicker, PS1 vertex wobble, N64 fog, Mega Drive rainbow dither, SNES mosaic...),
+then a composite / RF / RGB tube TV with dot crawl and beam-shaped scanlines, the handheld LCD with its pixel grid
+and ghosting, a monitor or an HDTV.
+
+**Game Engine**: a small software 3D renderer puts the picture *inside* a scene (poster in a brick room, cut-out standing
+in a field, spinning cube, Mode 7 floor, endless corridor) and draws it the way the hardware did: PS1 affine texture
+warping, vertex snapping jitter, no depth buffer and the PS1 dither; N64 tiny 64 px textures, bilinear blur, fog and
+the soft video filter; PS2 sharper textures, haze and bloom. Floor (checker, grass, stone, tiles, wood, sand, water,
+brick or your own picture), walls, colours and the sky / fog (day, night, sunset, vapor, toxic, void, blood, underwater...)
+are all tweakable. Then it goes through the Console TV.
+
+**Pixel Art**: smart pixelation. Each big pixel keeps its block's dominant colour (k-centroid, the method behind
+Astropulse's K-Centroid and PixelOE) and dark line work wins its block, so a drawing becomes crisp sprite art instead
+of blurry mush. Palette reduction and a sprite outline on top. The Game Engine uses it for its textures.
+
+**GIF mode** (GIF tab): tick it and APPLY, RUN STACK and the Filter Brush stop changing the still picture and add
+steps to a loop instead. Random effects re-roll every frame (snow crawls, VHS rolls, block rot flickers), SWEEP makes
+any slider travel A > B > A so the loop closes, masks keep the movement inside. Preview plays on the canvas;
+export MP4 (ffmpeg, small, Discord-ready) or GIF.
+
+**Preset browser** (BROWSE): every preset as a thumbnail, search, categories, favourites, and *Mine* for your own.
+
+130 presets ship in `presets.json`; **SAVE AS PRESET** adds yours.
 
 ## Install and run
 

@@ -13,6 +13,7 @@ from gl import colour
 
 NAME = 'Fractal Colour'
 KIND = 'filter'
+CATEGORY = 'Maths'
 PARAMS = [
     P('mode', 'MODE', choices=['hue bust', 'palette', 'posterize']),
     P('beta', '1/f BETA (smooth)', 1.0, 4.0, 2.6, 0.05),

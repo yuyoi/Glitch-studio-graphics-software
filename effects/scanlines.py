@@ -3,6 +3,7 @@ import numpy as np
 
 NAME = 'Scanlines'
 KIND = 'filter'
+CATEGORY = 'TV & Signal'
 PARAMS = [
     P('gap', 'EVERY N', 2, 32, 4),
     P('thick', 'THICKNESS', 1, 16, 1),

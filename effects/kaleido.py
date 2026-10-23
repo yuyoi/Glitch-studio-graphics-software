@@ -4,6 +4,7 @@ import numpy as np
 
 NAME = 'Kaleidoscope'
 KIND = 'filter'
+CATEGORY = 'Maths'
 PARAMS = [
     P('n', 'WEDGES', 2, 24, 6),
     P('mode', 'MODE', choices=['mirror', 'rotate']),

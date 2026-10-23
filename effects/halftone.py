@@ -4,6 +4,7 @@ import numpy as np
 
 NAME = 'Halftone'
 KIND = 'filter'
+CATEGORY = 'Print'
 PARAMS = [
     P('mode', 'MODE', choices=['cmyk', 'mono', 'colour dots']),
     P('cell', 'DOT GRID px', 3, 60, 10),

@@ -7,6 +7,7 @@ from gl import tvsignal as signal
 
 NAME = 'Block Brush'
 KIND = 'brush'
+CATEGORY = 'Data'
 NEEDS_PIXELS = True
 PARAMS = [
     P('size', 'SIZE', 16, 800, 160),

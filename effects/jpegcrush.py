@@ -6,6 +6,7 @@ from PIL import Image
 
 NAME = 'JPEG Crush'
 KIND = 'filter'
+CATEGORY = 'Data'
 PARAMS = [
     P('quality', 'QUALITY', 1, 40, 6),
     P('passes', 'PASSES', 1, 20, 3),

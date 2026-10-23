@@ -15,6 +15,7 @@ from gl import colour
 
 NAME = 'Turing'
 KIND = 'filter'
+CATEGORY = 'Maths'
 SLOW = True                                   # no live preview: press APPLY
 STYLES = {'coral': (0.0545, 0.062), 'spots': (0.035, 0.065), 'mitosis': (0.0367, 0.0649),
           'worms': (0.078, 0.061), 'maze': (0.029, 0.057), 'bubbles': (0.098, 0.0555)}

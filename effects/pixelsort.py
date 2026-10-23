@@ -3,6 +3,7 @@ import numpy as np
 
 NAME = 'Pixel Sort'
 KIND = 'filter'
+CATEGORY = 'Data'
 PARAMS = [
     P('dir', 'DIRECTION', choices=['horizontal', 'vertical']),
     P('lo', 'LOW', 0.0, 1.0, 0.25, 0.01),

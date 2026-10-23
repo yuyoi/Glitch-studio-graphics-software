@@ -40,6 +40,7 @@ def load(folder):
             assert m.KIND in ('brush', 'filter'), 'KIND must be brush or filter'
             m.ID = name
             m.PARAMS = list(getattr(m, 'PARAMS', []))
+            m.CATEGORY = getattr(m, 'CATEGORY', 'Other')
             found.append(m)
         except Exception:
             errors.append('%s: %s' % (name, traceback.format_exc(limit=1).strip().splitlines()[-1]))

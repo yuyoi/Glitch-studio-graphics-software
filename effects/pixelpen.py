@@ -1,6 +1,7 @@
 """Plain hard square pixel pen / eraser, for cleanup."""
 NAME = 'Pixel Pen'
 KIND = 'brush'
+CATEGORY = 'Tools'
 PARAMS = [
     P('size', 'SIZE', 1, 256, 10),
     P('press', 'PRESSURE>SIZE', 0.0, 1.0, 0.7, 0.01),

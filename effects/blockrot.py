@@ -7,6 +7,7 @@ from gl import tvsignal as signal
 
 NAME = 'Block Rot'
 KIND = 'filter'
+CATEGORY = 'Data'
 PARAMS = [
     P('crush', 'DCT CRUSH', 0.0, 200.0, 40.0, 1.0),
     P('chroma', 'COLOUR CRUSH x', 1.0, 6.0, 2.5, 0.1),

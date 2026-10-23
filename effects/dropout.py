@@ -5,6 +5,7 @@ from PIL import Image, ImageFilter
 
 NAME = 'Dropout'
 KIND = 'filter'
+CATEGORY = 'Print'
 PARAMS = [
     P('amount', 'AMOUNT', 0.0, 0.95, 0.4, 0.01),
     P('clump', 'CLUMP px', 0.0, 20.0, 5.0, 0.5),

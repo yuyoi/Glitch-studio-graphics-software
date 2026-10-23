@@ -3,6 +3,7 @@ import numpy as np
 
 NAME = 'Dither'
 KIND = 'filter'
+CATEGORY = 'Pixel'
 PARAMS = [
     P('pixel', 'PIXEL SIZE', 1, 32, 2),
     P('levels', 'LEVELS', 2, 16, 4),

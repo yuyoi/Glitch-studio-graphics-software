@@ -3,6 +3,7 @@ import numpy as np
 
 NAME = 'Slice Shift'
 KIND = 'filter'
+CATEGORY = 'Distort'
 PARAMS = [
     P('count', 'SLICES', 1, 200, 18),
     P('hmin', 'SLICE MIN px', 1, 200, 2),

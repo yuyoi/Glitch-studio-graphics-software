@@ -14,6 +14,7 @@ import numpy as np
 
 NAME = 'Speckle'
 KIND = 'brush'
+CATEGORY = 'Pixel'
 PARAMS = [
     P('area', 'AREA radius', 2, 600, 90),
     P('density', 'SPECKS / DAB', 1, 600, 45),

@@ -6,14 +6,15 @@ from PySide6.QtCore import Qt, QTimer, QRect, QRectF, QPointF, QEvent
 from PySide6.QtGui import (QAction, QBrush, QColor, QFont, QImage, QKeySequence, QPainter, QPen, QPixmap,
                            QPointingDevice, QInputDevice, QShortcut, QIcon)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox, QFileDialog, QFrame, QGridLayout,
-                               QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem, QMainWindow, QTabWidget,
+                               QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem, QMainWindow, QTabWidget, QLineEdit, QSpinBox,
                                QMessageBox, QPushButton, QScrollArea, QSlider, QVBoxLayout, QWidget, QButtonGroup)
 
-from . import effects
+from . import anim, effects
+from .browser import PresetBrowser
 from .doc import Document
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VERSION = '0.2'
+VERSION = '0.3'
 
 # ---------------------------------------------------------------- look
 C = dict(bg='#160e20', panel='#24183a', hi='#a77ae0', lo='#07040c', face='#34234f', text='#e8d8ff',
@@ -44,10 +45,31 @@ QScrollBar:vertical {{ background: {lo}; width: 12px; }}
 QScrollBar::handle:vertical {{ background: {face}; border: 2px solid; border-color: {hi} {lo} {lo} {hi}; }}
 QLabel#status {{ background: {lo}; color: {green}; padding: 3px 6px; border-top: 2px solid {sel}; }}
 QTabWidget::pane {{ border: none; }}
+QDialog {{ background: {bg}; }}
+QLineEdit, QSpinBox {{ background: {well}; border: 2px solid; border-color: {lo} {hi} {hi} {lo}; padding: 3px; color: {text}; }}
 QTabBar::tab {{ background: {face}; border: 2px solid; border-color: {hi} {lo} {lo} {hi}; padding: 3px 12px; }}
 QTabBar::tab:selected {{ background: {sel}; color: #ffffff; }}
 QPushButton#mask:checked {{ color: {pink}; }}
 """.format(**C)
+
+
+def guarded(fn):
+    """Qt event handlers: a Python error in one would take the whole app (and unsaved art) down with it.
+    Report it on the status line instead and keep running."""
+    def wrap(self, *a):
+        try:
+            return fn(self, *a)
+        except Exception:
+            msg = traceback.format_exc(limit=2).strip().splitlines()[-1]
+            win = getattr(self, 'win', None) or self
+            try:
+                if getattr(self, 'stroke', None) is not None:
+                    self.stroke = None
+                win.say('error (kept running): ' + msg)
+            except Exception:
+                pass
+    wrap.__name__ = fn.__name__
+    return wrap
 
 
 def sect(text):
@@ -218,6 +240,10 @@ class Canvas(QWidget):
         self.s, self.ox, self.oy = 1.0, 0.0, 0.0
         self.stroke = None
         self.stroke_mask = False
+        self.stroke_gif = False
+        self.gif_cov = None
+        self.anim = None
+        self.anim_i = 0
         self.before = None
         self.pan = None
         self.space = False
@@ -275,6 +301,7 @@ class Canvas(QWidget):
         if self.doc and ev.oldSize().width() <= 0:
             self.fit()
 
+    @guarded
     def paintEvent(self, ev):
         p = QPainter(self)
         p.fillRect(ev.rect(), self.bg)
@@ -297,8 +324,12 @@ class Canvas(QWidget):
         p.setClipRect(cr)
         p.fillRect(tgt, self.checker)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, s < 1)
-        p.drawImage(tgt, self.img, QRectF(sx0, sy0, sx1 - sx0, sy1 - sy0))
-        if d.has_mask and self.win.show_mask.isChecked():
+        if self.anim:                                           # GIF preview playing
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+            p.drawImage(cr, self.anim[self.anim_i])
+        else:
+            p.drawImage(tgt, self.img, QRectF(sx0, sy0, sx1 - sx0, sy1 - sy0))
+        if (d.has_mask or self.stroke_gif) and self.win.show_mask.isChecked() and not self.anim:
             p.drawImage(tgt, self.mimg, QRectF(sx0, sy0, sx1 - sx0, sy1 - sy0))
         p.setClipping(False)
         p.setPen(QPen(QColor(C['sel']), 1))
@@ -351,6 +382,7 @@ class Canvas(QWidget):
             return True
         return super().event(ev)
 
+    @guarded
     def touch_event(self, ev):
         """One finger pans, two fingers pinch-zoom (fingers never paint)."""
         pts = [p.position() for p in ev.points()]
@@ -390,6 +422,15 @@ class Canvas(QWidget):
             w.say('active layer is hidden'); return
         if (w.erase or eraser or getattr(w.brush, 'NEEDS_PIXELS', False)) and not L.arr[..., 3].any():
             w.say('"%s" is empty: erasing / slipping needs a layer with picture on it' % L.name)
+        w.stop_play()
+        if getattr(w.brush, 'NEEDS_FILTER', False) and w.gif_mode.isChecked():
+            self.gif_cov = np.zeros((self.doc.h, self.doc.w, 4), np.uint8)    # GIF mode: the stroke paints WHERE
+            ctx = effects.Ctx(self.gif_cov, (255, 255, 255), False, w.params[w.brush.ID], w.rng)
+            ctx.source = np.full_like(self.gif_cov, 255)
+            self.stroke_gif, self.stroke_mask, self.before = True, False, None
+            self.stroke = effects.Stroke(w.brush, ctx)
+            self.feed(pos, pr)
+            return
         src = None
         if getattr(w.brush, 'NEEDS_FILTER', False):
             src = w.filter_source(L)
@@ -418,7 +459,10 @@ class Canvas(QWidget):
         if not ctx.dirty:
             return
         x0, y0, x1, y1 = (int(v) for v in ctx.dirty)
-        if self.stroke_mask:
+        if self.stroke_gif:
+            d = self.doc
+            d.overlay[y0:y1, x0:x1, 3] = np.maximum(d.mask[y0:y1, x0:x1, 3], self.gif_cov[y0:y1, x0:x1, 3]) // 2
+        elif self.stroke_mask:
             self.doc.mask_changed(ctx.dirty)
         elif self.doc.has_mask and self.win.mask_brushes.isChecked() and self.before is not None:
             m = self.doc.mask[y0:y1, x0:x1, 3:4].astype(np.float32) / 255     # strokes only land inside the mask
@@ -435,6 +479,15 @@ class Canvas(QWidget):
             self.flush()
         except Exception:
             self.win.say('brush error: ' + traceback.format_exc(limit=1).splitlines()[-1])
+        if self.stroke_gif:
+            cov = self.gif_cov[..., 3]
+            if self.doc.has_mask:
+                cov = (cov.astype(np.uint16) * self.doc.mask[..., 3] // 255).astype(np.uint8)
+            self.win.gif_add(self.win.filter, self.win.params[self.win.filter.ID], cov.copy())
+            self.doc.mask_changed()
+            self.stroke_gif, self.gif_cov, self.stroke = False, None, None
+            self.update()
+            return
         if self.stroke_mask:
             self.doc.mask_changed()
         elif not getattr(self.win.brush, 'NEEDS_FILTER', False):
@@ -444,6 +497,7 @@ class Canvas(QWidget):
         self.win.touched()
 
     # ---- input
+    @guarded
     def tabletEvent(self, ev):
         self.last_tablet = time.time()
         t = ev.type()
@@ -467,6 +521,7 @@ class Canvas(QWidget):
         d = ev.device()
         return d is not None and d.type() == QInputDevice.DeviceType.TouchScreen
 
+    @guarded
     def mousePressEvent(self, ev):
         self.setFocus()
         if self.from_pen(ev):
@@ -477,6 +532,7 @@ class Canvas(QWidget):
         elif ev.button() == Qt.LeftButton:
             self.begin(ev.position(), 1.0, False)
 
+    @guarded
     def mouseMoveEvent(self, ev):
         if self.pan:
             p0, ox, oy = self.pan
@@ -489,6 +545,7 @@ class Canvas(QWidget):
         if self.doc:
             self.win.pos_status(self.to_doc(ev.position()))
 
+    @guarded
     def mouseReleaseEvent(self, ev):
         if self.pan:
             self.pan = None
@@ -496,11 +553,13 @@ class Canvas(QWidget):
         elif not self.from_pen(ev):
             self.finish()
 
+    @guarded
     def wheelEvent(self, ev):
         if not self.doc:
             return
         self.zoom_at(self.s * 1.25 ** (ev.angleDelta().y() / 120), ev.position())
 
+    @guarded
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key_Space and not ev.isAutoRepeat():
             self.space = True
@@ -508,6 +567,7 @@ class Canvas(QWidget):
         else:
             super().keyPressEvent(ev)
 
+    @guarded
     def keyReleaseEvent(self, ev):
         if ev.key() == Qt.Key_Space and not ev.isAutoRepeat():
             self.space = False
@@ -519,6 +579,7 @@ class Canvas(QWidget):
         if ev.mimeData().hasUrls():
             ev.acceptProposedAction()
 
+    @guarded
     def dropEvent(self, ev):
         urls = ev.mimeData().urls()
         if urls:
@@ -536,6 +597,10 @@ class Win(QMainWindow):
         self.fx, errs = effects.load(os.path.join(HERE, 'effects'))
         self.brushes = [m for m in self.fx if m.KIND == 'brush']
         self.filters = [m for m in self.fx if m.KIND == 'filter']
+        self.filters.sort(key=lambda m: (m.CATEGORY, m.NAME))
+        self.here = HERE
+        self.gif_steps = []
+        self.browser = None
         order = ['dotline', 'speckle', 'staticbrush', 'blockbrush', 'filterbrush', 'stretch', 'mosaic', 'hueshift',
                  'rowslip', 'pixelpen']           # nice order, new ones go after
         self.brushes.sort(key=lambda m: order.index(m.ID) if m.ID in order else 99)
@@ -650,7 +715,10 @@ class Win(QMainWindow):
         self.preset_box = QComboBox()
         self.preset_box.activated.connect(self.pick_preset)
         v.addWidget(self.preset_box)
-        v.addWidget(self.btn('SAVE CURRENT AS PRESET', self.save_preset))
+        row = QHBoxLayout()
+        row.addWidget(self.btn('BROWSE \u25a6', self.browse, 'all presets with thumbnails, search, favourites'), 1)
+        row.addWidget(self.btn('SAVE AS PRESET', self.save_preset))
+        v.addLayout(row)
         v.addSpacing(6)
         v.addWidget(sect('BRUSHES'))
         self.brush_group = QButtonGroup(self)
@@ -722,10 +790,20 @@ class Win(QMainWindow):
         v.setContentsMargins(0, 4, 0, 0)
         v.setSpacing(4)
         self.tabs.addTab(ftab, 'FILTERS')
+        row = QHBoxLayout()
+        self.fcat = QComboBox()
+        self.fcat.addItems(['ALL'] + sorted({m.CATEGORY for m in self.filters}))
+        self.fsearch = QLineEdit()
+        self.fsearch.setPlaceholderText('search')
+        self.fcat.currentIndexChanged.connect(self.filter_filter)
+        self.fsearch.textChanged.connect(self.filter_filter)
+        row.addWidget(self.fcat)
+        row.addWidget(self.fsearch, 1)
+        v.addLayout(row)
         self.filter_list = QListWidget()
         for m in self.filters:
             it = QListWidgetItem(m.NAME.upper())
-            it.setToolTip((m.__doc__ or '').strip())
+            it.setToolTip('[%s]  %s' % (m.CATEGORY, (m.__doc__ or '').strip()))
             self.filter_list.addItem(it)
         self.filter_list.setFixedHeight(min(230, 24 * max(1, len(self.filters)) + 8))
         self.filter_list.currentRowChanged.connect(lambda i: 0 <= i < len(self.filters) and self.pick_filter(self.filters[i]))
@@ -760,6 +838,43 @@ class Win(QMainWindow):
         row.addWidget(self.btn('SAVE STACK', self.save_stack, 'save as a preset'))
         row.addWidget(self.btn('RUN STACK', self.run_stack, 'apply every step to the active layer'), 1)
         sv.addLayout(row)
+
+        gtab = QWidget()
+        gv = QVBoxLayout(gtab)
+        gv.setContentsMargins(0, 4, 0, 0)
+        gv.setSpacing(4)
+        self.tabs.addTab(gtab, 'GIF')
+        self.gif_mode = QCheckBox('GIF MODE: APPLY, stacks and the\nfilter brush add to the loop')
+        self.gif_mode.setFocusPolicy(Qt.NoFocus)
+        self.gif_mode.toggled.connect(self.gif_toggled)
+        gv.addWidget(self.gif_mode)
+        row = QHBoxLayout()
+        self.gif_frames = QSpinBox(); self.gif_frames.setRange(2, 240); self.gif_frames.setValue(12)
+        self.gif_fps = QSpinBox(); self.gif_fps.setRange(1, 60); self.gif_fps.setValue(12)
+        for lab, wdg in (('FRAMES', self.gif_frames), ('FPS', self.gif_fps)):
+            row.addWidget(QLabel(lab)); row.addWidget(wdg)
+        gv.addLayout(row)
+        self.gif_list = QListWidget()
+        gv.addWidget(self.gif_list, 1)
+        row = QHBoxLayout()
+        for text, fn, tip in (('SWEEP', self.gif_sweep, 'a setting that moves A > B > A over the loop'),
+                              ('\u27f3', self.gif_reroll, 're-roll the randomness every frame on/off'),
+                              ('DEL', self.gif_del, 'remove step'), ('CLEAR', self.gif_clear, 'remove all steps')):
+            row.addWidget(self.btn(text, fn, tip))
+        gv.addLayout(row)
+        row = QHBoxLayout()
+        self.play_btn = self.btn('\u25b6 PREVIEW', self.gif_play, 'render the loop and play it on the canvas', check=True)
+        self.gif_scale = QComboBox(); self.gif_scale.addItems(['50%', '100%', '25%', '75%'])
+        self.gif_scale.setToolTip('size of preview + export')
+        row.addWidget(self.play_btn, 1)
+        row.addWidget(self.gif_scale)
+        gv.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(self.btn('EXPORT MP4', lambda: self.gif_export('mp4'), 'small file, made for Discord (needs ffmpeg)'))
+        row.addWidget(self.btn('EXPORT GIF', lambda: self.gif_export('gif'), 'real GIF (256 colours, big files)'))
+        gv.addLayout(row)
+        self.play_timer = QTimer(self)
+        self.play_timer.timeout.connect(self.next_frame)
 
         v = outer
         v.addWidget(sect('MASK  (effects stay inside)'))
@@ -858,7 +973,9 @@ class Win(QMainWindow):
         self.filter_params.build(m, self.params[m.ID])
 
     def filter_changed(self):
-        if getattr(self.filter, 'SLOW', False):
+        if self.gif_mode.isChecked():
+            self.say('GIF mode: APPLY adds %s to the loop, \u25b6 PREVIEW plays it' % self.filter.NAME)
+        elif getattr(self.filter, 'SLOW', False):
             self.say('%s is slow: press APPLY to run it' % self.filter.NAME)
         elif self.live_box.isChecked() and self.doc:
             self.preview_timer.start(180)
@@ -894,6 +1011,14 @@ class Win(QMainWindow):
 
     def apply_filter(self):
         if not self.doc or not self.filter:
+            return
+        if self.gif_mode.isChecked():
+            if self.live is not None:                           # drop a still preview: in GIF mode it goes in the loop
+                L, base = self.live
+                L.arr = base
+                self.live = None
+                self.canvas.refresh()
+            self.gif_add(self.filter, self.params[self.filter.ID])
             return
         if self.live is not None:
             self.live = None
@@ -939,8 +1064,183 @@ class Win(QMainWindow):
         self.say('MASK MODE: brushes paint the mask, erase removes it. M to go back' if self.mask_mode
                  else 'painting the layer again')
 
+    # ---------------------------------------------------------------- filter list search
+    def filter_filter(self):
+        cat = self.fcat.currentText()
+        s = self.fsearch.text().strip().lower()
+        for i, m in enumerate(self.filters):
+            hay = (m.NAME + ' ' + m.CATEGORY + ' ' + (m.__doc__ or '')).lower()
+            hide = (cat != 'ALL' and m.CATEGORY != cat) or (s and not all(w in hay for w in s.split()))
+            self.filter_list.item(i).setHidden(bool(hide))
+
+    # ---------------------------------------------------------------- GIF mode
+    def gif_toggled(self, on):
+        self.stop_play()
+        if on and self.live is not None:
+            self.live[0].arr = self.live[1]
+            self.live = None
+            self.canvas.refresh()
+        self.show_mode()
+        if on:
+            self.tabs.setCurrentIndex(0)
+        self.say('GIF MODE: APPLY / RUN STACK / filter brush now add steps to the loop; brushes still paint the picture'
+                 if on else 'GIF mode off: filters apply to the picture again')
+
+    def gif_add(self, m, params, mask='auto'):
+        if isinstance(mask, str):
+            mask = self.doc.mask[..., 3].copy() if self.doc and self.doc.has_mask else None
+        self.gif_steps.append(dict(effect=m.ID, params=dict(params), reroll=True, sweep={}, mask=mask))
+        self.stop_play()
+        self.sync_gif()
+        self.gif_list.setCurrentRow(len(self.gif_steps) - 1)
+        self.say('GIF: added %s (step %d)%s. ▶ PREVIEW on the GIF tab' %
+                 (m.NAME, len(self.gif_steps), ' inside the mask' if mask is not None else ''))
+
+    def sync_gif(self):
+        fx = {m.ID: m for m in self.fx}
+        self.gif_list.clear()
+        for i, st in enumerate(self.gif_steps):
+            self.gif_list.addItem('%d. %s' % (i + 1, anim.describe(st, fx)))
+
+    def gif_current(self):
+        i = self.gif_list.currentRow()
+        return (i, self.gif_steps[i]) if 0 <= i < len(self.gif_steps) else (None, None)
+
+    def gif_sweep(self):
+        i, st = self.gif_current()
+        if st is None:
+            self.say('pick a step in the GIF list first'); return
+        m = next((m for m in self.fx if m.ID == st['effect']), None)
+        nums = [q for q in m.PARAMS if 'choices' not in q] if m else []
+        if not nums:
+            self.say('this filter has no sliders to sweep'); return
+        labels = ['(no sweep)'] + ['%s  [%s]' % (q['label'], q['key']) for q in nums]
+        pick, ok = QInputDialog.getItem(self, 'sweep', 'which setting moves over the loop?', labels, 1, False)
+        if not ok:
+            return
+        if pick == '(no sweep)':
+            st['sweep'] = {}
+        else:
+            q = nums[labels.index(pick) - 1]
+            cur = st['params'].get(q['key'], q['default'])
+            dec = 0 if q['int'] else 3
+            a, ok = QInputDialog.getDouble(self, 'sweep', '%s from' % q['label'], cur, q['lo'], q['hi'], dec)
+            if not ok:
+                return
+            b, ok = QInputDialog.getDouble(self, 'sweep', '%s to (and back)' % q['label'], q['hi'], q['lo'], q['hi'], dec)
+            if not ok:
+                return
+            st['sweep'] = {q['key']: (a, b)}
+        self.stop_play()
+        self.sync_gif()
+        self.gif_list.setCurrentRow(i)
+
+    def gif_reroll(self):
+        i, st = self.gif_current()
+        if st is not None:
+            st['reroll'] = not st.get('reroll', True)
+            self.stop_play()
+            self.sync_gif()
+            self.gif_list.setCurrentRow(i)
+
+    def gif_del(self):
+        i, st = self.gif_current()
+        if st is not None:
+            del self.gif_steps[i]
+            self.stop_play()
+            self.sync_gif()
+
+    def gif_clear(self):
+        self.gif_steps = []
+        self.stop_play()
+        self.sync_gif()
+
+    def gif_scale_value(self):
+        return int(self.gif_scale.currentText().rstrip('%')) / 100
+
+    def gif_frames_iter(self, scale):
+        """Yields the rendered frames; the picture (all visible layers) is the base of every frame."""
+        self.doc.composite()
+        base = anim.scaled(self.doc.comp.copy(), scale)
+        fx = {m.ID: m for m in self.fx}
+        n = self.gif_frames.value()
+        for i in range(n):
+            yield anim.render_frame(base, self.gif_steps, fx, i, n, self.seed)
+
+    def gif_play(self):
+        if not self.play_btn.isChecked():
+            self.stop_play()
+            return
+        if not self.doc or not self.gif_steps:
+            self.play_btn.setChecked(False)
+            self.say('GIF: nothing to animate yet: tick GIF MODE, then APPLY a filter (snow, VHS, block rot...)')
+            return
+        frames = []
+        t = time.time()
+        n = self.gif_frames.value()
+        try:
+            for k, fr in enumerate(self.gif_frames_iter(self.gif_scale_value())):
+                frames.append(QImage(fr.data, fr.shape[1], fr.shape[0], fr.shape[1] * 4, QImage.Format.Format_RGBA8888).copy())
+                self.say('rendering frame %d / %d...' % (k + 1, n))
+                QApplication.processEvents()
+                if not self.play_btn.isChecked():
+                    return
+        except Exception:
+            self.play_btn.setChecked(False)
+            self.say('GIF render failed: ' + traceback.format_exc(limit=1).splitlines()[-1])
+            return
+        self.canvas.anim, self.canvas.anim_i = frames, 0
+        self.play_timer.start(int(1000 / self.gif_fps.value()))
+        self.play_btn.setText('■ STOP')
+        self.say('playing %d frames at %d fps (rendered in %.1fs). Any edit stops it' % (n, self.gif_fps.value(), time.time() - t))
+
+    def next_frame(self):
+        if self.canvas.anim:
+            self.canvas.anim_i = (self.canvas.anim_i + 1) % len(self.canvas.anim)
+            self.canvas.update()
+
+    def stop_play(self):
+        if getattr(self, 'play_timer', None) is not None:
+            self.play_timer.stop()
+        if getattr(self, 'canvas', None) is not None and self.canvas.anim:
+            self.canvas.anim = None
+            self.canvas.update()
+        if getattr(self, 'play_btn', None) is not None:
+            self.play_btn.setChecked(False)
+            self.play_btn.setText('▶ PREVIEW')
+
+    def gif_export(self, kind):
+        if not self.doc or not self.gif_steps:
+            self.say('GIF: nothing to export yet (add steps in GIF MODE)'); return
+        self.stop_play()
+        p, _ = QFileDialog.getSaveFileName(self, 'export ' + kind.upper(), self.suggest('.' + kind),
+                                           ('MP4 video (*.mp4)' if kind == 'mp4' else 'GIF (*.gif)'))
+        if not p:
+            return
+        if not p.lower().endswith('.' + kind):
+            p += '.' + kind
+        if self.doc.source and os.path.normcase(os.path.abspath(p)) == os.path.normcase(self.doc.source):
+            self.say('NOT exported: that is the file you opened'); return
+        n, fps, sc = self.gif_frames.value(), self.gif_fps.value(), self.gif_scale_value()
+
+        def prog(k):
+            self.say('exporting frame %d / %d...' % (k + 1, n))
+            QApplication.processEvents()
+        try:
+            if kind == 'mp4':
+                w, h = int(self.doc.w * sc), int(self.doc.h * sc)
+                if abs(sc - 1) < 1e-3:
+                    w, h = self.doc.w, self.doc.h
+                loops = max(1, int(np.ceil(3 * fps / n)))                  # at least ~3 s so players loop it nicely
+                anim.export_mp4(self.gif_frames_iter(sc), p, fps, w, h, loops, prog)
+            else:
+                anim.export_gif(self.gif_frames_iter(sc), p, fps, prog)
+        except Exception as e:
+            self.say('NOT exported: %s' % e); return
+        self.say('exported %s (%d frames, %d fps, %d%%)' % (p, n, fps, sc * 100))
+
     def show_mode(self):
-        self.title.mode = ('MASK ' if self.mask_mode else '') + ('ERASE' if self.erase else 'PAINT')
+        self.title.mode = ('GIF ' if self.gif_mode.isChecked() else '') + ('MASK ' if self.mask_mode else '') + ('ERASE' if self.erase else 'PAINT')
         self.paint_status()
 
     def mask_edit(self, fn, what):
@@ -1028,6 +1328,11 @@ class Win(QMainWindow):
             return
         self.commit_preview()
         fx = {m.ID: m for m in self.filters}
+        if self.gif_mode.isChecked():
+            for st in self.stack:
+                if st['effect'] in fx:
+                    self.gif_add(fx[st['effect']], st['params'])
+            return
         L = self.doc.layer
         base = L.arr
         self.doc.push_pixels(L)
@@ -1060,7 +1365,7 @@ class Win(QMainWindow):
             return
         name, ok = QInputDialog.getText(self, 'save stack', 'stack name')
         if ok and name.strip():
-            pr = dict(name=name.strip(), effect='__stack__', stack=[dict(s) for s in self.stack])
+            pr = dict(name=name.strip(), effect='__stack__', stack=[dict(s) for s in self.stack], mine=True)
             self.presets = [p for p in self.presets if not (p['name'] == pr['name'] and p['effect'] == '__stack__')] + [pr]
             self.write_presets()
             self.say('stack saved: ' + pr['name'])
@@ -1170,8 +1475,16 @@ class Win(QMainWindow):
 
     def pick_preset(self, i):
         pr = self.preset_box.itemData(i)
-        if not pr:
-            return
+        if pr:
+            self.apply_preset(pr)
+
+    def browse(self):
+        if self.browser is None:
+            self.browser = PresetBrowser(self)
+        self.browser.show()
+        self.browser.raise_()
+
+    def apply_preset(self, pr):
         if pr.get('effect') == '__stack__':
             self.stack = [dict(effect=s['effect'], params=dict(s.get('params', {}))) for s in pr['stack']]
             self.sync_stack()
@@ -1218,6 +1531,7 @@ class Win(QMainWindow):
             pr['color'] = list(self.color)
             pr['cmode'] = self.cmode
             pr['per_pixel'] = self.per_pixel.isChecked()
+        pr['mine'] = True
         self.presets = [p for p in self.presets if not (p['name'] == pr['name'] and p['effect'] == m.ID)] + [pr]
         self.write_presets()
         self.say('preset saved: ' + pr['name'])
@@ -1228,6 +1542,9 @@ class Win(QMainWindow):
             fh.write('[\n' + ',\n'.join(' ' + json.dumps(p) for p in self.presets) + '\n]\n')
         os.replace(tmp, self.preset_path())
         self.load_presets()
+        if self.browser is not None and self.browser.isVisible():
+            self.browser.refresh_categories()
+            self.browser.populate()
 
     # ---------------------------------------------------------------- layers
     def sync_layers(self):
@@ -1475,6 +1792,7 @@ class Win(QMainWindow):
             self.canvas.s = 1.0
             self.canvas.center()
 
+    @guarded
     def closeEvent(self, ev):
         if self.ok_to_drop():
             ev.accept()

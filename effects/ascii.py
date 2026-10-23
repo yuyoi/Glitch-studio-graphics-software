@@ -5,6 +5,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 NAME = 'ASCII'
 KIND = 'filter'
+CATEGORY = 'Print'
 PARAMS = [
     P('cell', 'CHAR HEIGHT px', 6, 48, 14),
     P('chars', 'CHARACTERS', choices=['ascii', 'blocks', 'binary', 'symbols']),

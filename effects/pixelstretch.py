@@ -4,6 +4,7 @@ import numpy as np
 
 NAME = 'Pixel Stretch'
 KIND = 'filter'
+CATEGORY = 'Distort'
 PARAMS = [
     P('dir', 'DIRECTION', choices=['down', 'up', 'right', 'left']),
     P('start', 'START AT', choices=['bright', 'dark', 'random']),

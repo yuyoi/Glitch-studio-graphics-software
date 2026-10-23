@@ -3,6 +3,7 @@ import numpy as np
 
 NAME = 'RGB Shift'
 KIND = 'filter'
+CATEGORY = 'Colour'
 PARAMS = [
     P('rx', 'RED X', -64, 64, 6),
     P('ry', 'RED Y', -64, 64, 0),

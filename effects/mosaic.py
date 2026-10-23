@@ -4,6 +4,7 @@ import numpy as np
 
 NAME = 'Mosaic'
 KIND = 'brush'
+CATEGORY = 'Pixel'
 NEEDS_PIXELS = True
 PARAMS = [
     P('size', 'SIZE', 8, 1000, 180),

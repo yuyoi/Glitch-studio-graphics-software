@@ -7,6 +7,7 @@ from gl import colour
 
 NAME = 'Neon Edges'
 KIND = 'filter'
+CATEGORY = 'Colour'
 PARAMS = [
     P('mode', 'MODE', choices=['neon on black', 'over picture', 'edges only']),
     P('thresh', 'EDGE THRESHOLD', 0.0, 1.0, 0.15, 0.01),

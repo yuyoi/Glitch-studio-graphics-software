@@ -5,6 +5,7 @@ import numpy as np
 
 NAME = 'Filter Brush'
 KIND = 'brush'
+CATEGORY = 'Tools'
 NEEDS_FILTER = True
 PARAMS = [
     P('size', 'SIZE', 4, 1000, 160),

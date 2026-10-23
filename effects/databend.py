@@ -5,6 +5,7 @@ import numpy as np
 
 NAME = 'Databend'
 KIND = 'filter'
+CATEGORY = 'Data'
 PARAMS = [
     P('mode', 'MODE', choices=['insert bytes', 'delete bytes', 'echo runs', 'bit flips', 'wordpad']),
     P('hits', 'HITS', 1, 200, 8),

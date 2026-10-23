@@ -14,6 +14,7 @@ from gl import colour
 
 NAME = 'Quasicrystal'
 KIND = 'filter'
+CATEGORY = 'Maths'
 PARAMS = [
     P('mode', 'MODE', choices=['palette', 'hue bust', 'cut', 'rgb split']),
     P('waves', 'WAVES (symmetry)', 3, 13, 7),

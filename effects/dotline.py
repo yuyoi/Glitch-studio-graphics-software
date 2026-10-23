@@ -4,6 +4,7 @@ import math
 
 NAME = 'Dot Line'
 KIND = 'brush'
+CATEGORY = 'Pixel'
 PARAMS = [
     P('size', 'DOT SIZE', 1, 64, 7),
     P('gap', 'GAP (x dot)', 1.0, 8.0, 2.2, 0.1),

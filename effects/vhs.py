@@ -6,6 +6,7 @@ from gl import tvsignal as signal
 
 NAME = 'VHS / Cable'
 KIND = 'filter'
+CATEGORY = 'TV & Signal'
 PARAMS = [
     P('jitter', 'LINE WOBBLE px', 0, 60, 6),
     P('rough', 'WOBBLE ROUGHNESS', 0.0, 1.0, 0.3, 0.01),

@@ -4,6 +4,7 @@ import numpy as np
 
 NAME = 'Wave Melt'
 KIND = 'filter'
+CATEGORY = 'Distort'
 PARAMS = [
     P('mode', 'MODE', choices=['wave', 'melt drip', 'swirl', 'ripple']),
     P('amount', 'AMOUNT px', 0, 400, 30),

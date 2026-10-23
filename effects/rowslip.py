@@ -4,6 +4,7 @@ import numpy as np
 
 NAME = 'Row Slip'
 KIND = 'brush'
+CATEGORY = 'Distort'
 NEEDS_PIXELS = True
 PARAMS = [
     P('width', 'WIDTH', 8, 1200, 320),

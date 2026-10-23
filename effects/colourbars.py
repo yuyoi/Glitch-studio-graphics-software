@@ -6,6 +6,7 @@ from gl import tvsignal as signal
 
 NAME = 'Colour Bars'
 KIND = 'filter'
+CATEGORY = 'TV & Signal'
 PARAMS = [
     P('style', 'STYLE', choices=['smpte', 'ebu', 'rgb ramp']),
     P('mode', 'MODE', choices=['behind', 'slices', 'over', 'replace']),

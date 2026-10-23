@@ -6,6 +6,7 @@ from gl import colour
 
 NAME = 'Hue Shift'
 KIND = 'brush'
+CATEGORY = 'Colour'
 NEEDS_PIXELS = True
 PARAMS = [
     P('size', 'SIZE', 4, 1000, 140),

@@ -11,6 +11,7 @@ from gl import tvsignal as signal
 
 NAME = 'TV Snow'
 KIND = 'filter'
+CATEGORY = 'TV & Signal'
 PARAMS = [
     P('mode', 'MODE', choices=['over', 'behind', 'ghost']),
     P('amount', 'AMOUNT', 0.0, 1.0, 0.35, 0.01),

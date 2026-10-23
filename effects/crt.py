@@ -5,6 +5,7 @@ from PIL import Image, ImageFilter
 
 NAME = 'CRT'
 KIND = 'filter'
+CATEGORY = 'TV & Signal'
 PARAMS = [
     P('curve', 'GLASS CURVE', 0.0, 0.4, 0.12, 0.01),
     P('mask', 'PHOSPHOR MASK', choices=['aperture grille', 'shadow mask', 'slot mask', 'none']),

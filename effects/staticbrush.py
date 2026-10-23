@@ -6,6 +6,7 @@ from gl import tvsignal as signal
 
 NAME = 'Static'
 KIND = 'brush'
+CATEGORY = 'TV & Signal'
 PARAMS = [
     P('size', 'SIZE', 4, 800, 120),
     P('shape', 'SHAPE', choices=['circle', 'square', 'scan band']),
