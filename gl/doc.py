@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image
 
 UNDO_LIMIT = 30
+UNDO_BYTES = 1500 * 1024 * 1024        # big pictures: keep fewer undo steps instead of eating all the RAM
 
 
 class Layer:
@@ -45,6 +46,13 @@ class Document:
         x1, y1 = min(self.w, int(x1)), min(self.h, int(y1))
         if x1 <= x0 or y1 <= y0:
             return None
+        vis = [L for L in self.layers if L.visible and L.opacity > 0]
+        if len(vis) <= 1 and (not vis or vis[0].opacity >= 1):  # one plain layer (the usual case): just copy it
+            if vis:
+                self.comp[y0:y1, x0:x1] = vis[0].arr[y0:y1, x0:x1]
+            else:
+                self.comp[y0:y1, x0:x1] = 0
+            return x0, y0, x1, y1
         rgb = np.zeros((y1 - y0, x1 - x0, 3), np.float32)        # premultiplied accumulator
         a = np.zeros((y1 - y0, x1 - x0, 1), np.float32)
         for L in self.layers:
@@ -63,6 +71,9 @@ class Document:
     def push(self, entry):
         self.undo.append(entry)
         del self.undo[:-UNDO_LIMIT]
+        size = lambda e: e[2].nbytes if e[0] == 'pixels' else (e[1].nbytes if e[0] == 'mask' else 0)
+        while len(self.undo) > 3 and sum(size(e) for e in self.undo) > UNDO_BYTES:
+            del self.undo[0]                                      # oldest steps go first
         self.redo.clear()
 
     def push_pixels(self, layer):
@@ -79,6 +90,13 @@ class Document:
             self.has_mask = bool(self.mask[..., 3].any())
         elif not self.has_mask:
             self.has_mask = bool(self.mask[y0:y1, x0:x1, 3].any())
+
+    def masked_with(self, mask, before, after):
+        """masked() with a mask captured earlier (safe to run in a background thread)."""
+        if mask is None:
+            return after
+        m = mask[..., None].astype(np.float32) / 255
+        return (before.astype(np.float32) * (1 - m) + after.astype(np.float32) * m + 0.5).astype(np.uint8)
 
     def masked(self, before, after):
         """Blend a filter result into the layer only where the mask is (whole layer if there is no mask)."""

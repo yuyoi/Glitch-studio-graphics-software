@@ -127,6 +127,23 @@ def scale_params(m, p, shape):
     return out
 
 
+def scale_by(m, p, f):
+    """Copy of p with pixel sizes times f, no minimum clamp: a shrunken preview keeps the full picture's proportions."""
+    out = dict(p)
+    if abs(f - 1) < 1e-3:
+        return out
+    ints = {q['key']: q.get('int', False) for q in m.PARAMS}
+    for k in getattr(m, 'SCALE', []):
+        if k in out and isinstance(out[k], (int, float)):
+            v = out[k] * f
+            if ints.get(k):
+                nv = int(round(v))
+                out[k] = nv if nv != 0 or out[k] == 0 else (1 if out[k] > 0 else -1)
+            else:
+                out[k] = v
+    return out
+
+
 def defaults(m):
     return {q['key']: q['default'] for q in m.PARAMS}
 

@@ -408,6 +408,9 @@ class Canvas(QWidget):
         w = self.win
         if not self.doc or not w.brush:
             return
+        if w.bg is not None and w.bg.is_alive() and not getattr(w.brush, 'NEEDS_FILTER', False):
+            w.say('wait a moment: %s' % w.bg_label)
+            return
         w.commit_preview()
         if w.mask_pick:                                         # BY COLOUR: one click selects that colour
             w.mask_by_colour(self.to_doc(pos))
@@ -657,6 +660,12 @@ class Win(QMainWindow):
         self.preview_gen = 0
         pt = QTimer(self); pt.timeout.connect(self.poll_preview); pt.start(30)
         self.preview_px = 900                           # adapts to how fast the filter is (dynamic resolution)
+        self.bg = None                                  # one background job at a time (APPLY / stack / filter brush)
+        self.bg_q = queue.Queue()
+        self.bg_label = ''
+        self.fb_timer = QTimer(self)                    # filter brush: re-prepare shortly after settings change
+        self.fb_timer.setSingleShot(True)
+        self.fb_timer.timeout.connect(self.prepare_filter_brush)
         self.refine_timer = QTimer(self)                # when the sliders rest: one full-size preview = exactly APPLY
         self.refine_timer.setSingleShot(True)
         self.refine_timer.timeout.connect(self.refine_preview)
@@ -980,6 +989,7 @@ class Win(QMainWindow):
         self.brush_btns[m.ID].setChecked(True)
         self.brush_params.build(m, self.params[m.ID])
         self.paint_status()
+        self.prepare_filter_brush()
 
     def brush_changed(self):
         self.canvas.update()                                   # outline follows the size sliders
@@ -995,8 +1005,10 @@ class Win(QMainWindow):
             self.filter_list.setCurrentRow(i)
             self.filter_list.blockSignals(False)
         self.filter_params.build(m, self.params[m.ID])
+        self.prepare_filter_brush(300)
 
     def filter_changed(self):
+        self.prepare_filter_brush(600)
         if self.gif_mode.isChecked():
             self.say('GIF mode: APPLY adds %s to the loop, \u25b6 PREVIEW plays it' % self.filter.NAME)
         elif getattr(self.filter, 'SLOW', False):
@@ -1033,13 +1045,20 @@ class Win(QMainWindow):
         auto = self.autoscale_btn.isChecked()
         f = 1.0 if (full or not auto) else min(1.0, self.preview_px / max(h, w))
         self.last_job = job
-        small = anim.scaled(base, f) if f < 1 else base.copy()
-        vals = self.px(m, params, small.shape)
+        vals = self.px(m, params, base.shape)              # settings as they'd be at full size...
+        if f < 1:
+            vals = effects.scale_by(m, vals, f)              # ...then shrunk with the preview: same proportions
+        mask = self.doc.mask[..., 3].copy() if self.doc.has_mask else None
+        doc = self.doc
         t0 = time.time()
 
-        def work():
+        def work():                                          # shrink, filter, grow back, mask: all off the UI thread
             try:
-                res, err = np.ascontiguousarray(m.apply(small, vals, np.random.default_rng(seed)), np.uint8), None
+                small = anim.scaled(base, f) if f < 1 else base.copy()
+                res = np.ascontiguousarray(m.apply(small, vals, np.random.default_rng(seed)), np.uint8)
+                if res.shape[:2] != base.shape[:2]:
+                    res = np.asarray(Image.fromarray(res).resize((base.shape[1], base.shape[0]), Image.BILINEAR))
+                res, err = doc.masked_with(mask, base, res), None
             except Exception:
                 res, err = None, traceback.format_exc(limit=1).splitlines()[-1]
             self.preview_q.put((gen, L, m.NAME, res, err, time.time() - t0, f < 1, full))
@@ -1055,10 +1074,7 @@ class Win(QMainWindow):
             if err:
                 self.say('filter error: ' + err)
                 continue
-            base = self.live[1]
-            if res.shape[:2] != base.shape[:2]:
-                res = np.asarray(Image.fromarray(res).resize((base.shape[1], base.shape[0]), Image.NEAREST))
-            L.arr = self.doc.masked(base, res)
+            L.arr = res
             self.canvas.refresh()
             if not full:                                # aim for ~0.15 s per preview: smaller when slow, bigger when fast
                 if dt > 0.22:
@@ -1069,6 +1085,12 @@ class Win(QMainWindow):
                     self.refine_timer.start(450)
             self.say('%s preview (%.1fs%s)%s  APPLY keeps it (full size), Ctrl+Z drops it' %
                      (name, dt, ', reduced size: sharpens when you stop' if reduced else ', full size', ' inside mask' if self.doc.has_mask else ''))
+        while not self.bg_q.empty():                         # finished background jobs (APPLY, stacks, filter brush)
+            done, res, err, dt = self.bg_q.get()
+            if err:
+                self.say('failed: ' + err)
+            else:
+                done(res, dt)
         if self.preview_pending is not None and (self.preview_thread is None or not self.preview_thread.is_alive()):
             job, self.preview_pending = self.preview_pending, None
             if job[0] == self.preview_gen and self.live is not None:
@@ -1110,23 +1132,52 @@ class Win(QMainWindow):
             self.drop_preview()                                  # in GIF mode it goes in the loop instead
             self.gif_add(self.filter, self.params[self.filter.ID])
             return
+        if self.busy():
+            return
         L = self.doc.layer
         base = self.live[1] if self.live is not None and self.live[0] is L else L.arr
         self.drop_preview()                                      # layer back to untouched, stale renders ignored
-        self.say('rendering %s at full size...' % self.filter.NAME)
-        QApplication.processEvents()
-        t = time.time()
-        try:
-            out = self.doc.masked(base, np.ascontiguousarray(self.run_filter(base), np.uint8))
-        except Exception:
-            self.say('filter error: ' + traceback.format_exc(limit=1).splitlines()[-1])
-            return
-        self.doc.push(('pixels', L, base))
-        L.arr = out
-        self.fgen += 1
-        self.canvas.refresh()
-        self.touched()
-        self.say('%s applied (%.1fs)' % (self.filter.NAME, time.time() - t))
+        m, seed, doc = self.filter, self.seed, self.doc
+        vals = self.px(m, self.params[m.ID], base.shape)
+        mask = doc.mask[..., 3].copy() if doc.has_mask else None
+
+        def work():
+            return doc.masked_with(mask, base, np.ascontiguousarray(m.apply(base, vals, np.random.default_rng(seed)), np.uint8))
+
+        def done(out, dt):
+            if self.doc is not doc or L not in doc.layers:
+                return
+            doc.push(('pixels', L, base))
+            L.arr = out
+            self.fgen += 1
+            self.canvas.refresh()
+            self.touched()
+            self.say('%s applied (%.1fs)' % (m.NAME, dt))
+        self.run_bg('rendering %s at full size (you can keep looking around)' % m.NAME, work, done)
+
+    def busy(self):
+        if self.bg is not None and self.bg.is_alive():
+            self.say('still busy: %s' % self.bg_label)
+            return True
+        return False
+
+    def run_bg(self, label, work, done):
+        """Heavy work off the UI thread so the window never freezes; done(result, seconds) runs back on the UI thread."""
+        if self.busy():
+            return False
+        self.bg_label = label
+        t0 = time.time()
+
+        def run():
+            try:
+                res, err = work(), None
+            except Exception:
+                res, err = None, traceback.format_exc(limit=1).splitlines()[-1]
+            self.bg_q.put((done, res, err, time.time() - t0))
+        self.bg = threading.Thread(target=run, daemon=True)
+        self.bg.start()
+        self.say(label + '...')
+        return True
 
     def px(self, m, params, shape):
         """Settings as the effect should see them: pixel sizes scaled to this picture when AUTO-SCALE is on."""
@@ -1186,6 +1237,15 @@ class Win(QMainWindow):
                 failed.append('%s (%s)' % (os.path.basename(path), e))
         self.say('BATCH done: %d saved to %s%s' % (done, outdir, ('; failed: ' + ', '.join(failed)) if failed else ''))
 
+    def prepare_filter_brush(self, delay=0):
+        """Filter Brush picked / filter changed / layer switched: render its filter in the background right away,
+        so it is ready before the pen comes down."""
+        if self.doc and self.brush and getattr(self.brush, 'NEEDS_FILTER', False) and not self.gif_mode.isChecked():
+            if delay:
+                self.fb_timer.start(delay)
+            elif not (self.bg is not None and self.bg.is_alive()):
+                self.filter_source(self.doc.layer)
+
     def filter_source(self, L):
         """The active layer run through the current filter, cached for the Filter Brush."""
         if not self.filter:
@@ -1193,16 +1253,15 @@ class Win(QMainWindow):
         key = (self.filter.ID, json.dumps(self.params[self.filter.ID], sort_keys=True), self.seed, id(L), self.fgen)
         if self.fcache and self.fcache[0] == key:
             return self.fcache[1]
-        self.say('rendering %s for the filter brush...' % self.filter.NAME)
-        QApplication.processEvents()
-        try:
-            src = np.ascontiguousarray(self.run_filter(L.arr), np.uint8)
-        except Exception:
-            self.say('filter error: ' + traceback.format_exc(limit=1).splitlines()[-1])
-            return None
-        self.fcache = (key, src)
-        self.say('filter brush paints: %s (change it on the FILTERS tab)' % self.filter.NAME)
-        return src
+        m, seed, arr = self.filter, self.seed, L.arr.copy()
+        vals = self.px(m, self.params[m.ID], arr.shape)
+
+        def done(src, dt):
+            self.fcache = (key, src)
+            self.say('filter brush ready: %s (%.1fs). Paint!' % (m.NAME, dt))
+        self.run_bg('preparing %s for the filter brush (paint again when it says ready)' % m.NAME,
+                    lambda: np.ascontiguousarray(m.apply(arr, vals, np.random.default_rng(seed)), np.uint8), done)
+        return None
 
     # ---------------------------------------------------------------- mask
     def toggle_mask_mode(self):
@@ -1480,33 +1539,35 @@ class Win(QMainWindow):
                 if st['effect'] in fx:
                     self.gif_add(fx[st['effect']], st['params'])
             return
-        L = self.doc.layer
+        if self.busy():
+            return
+        L, doc, seed = self.doc.layer, self.doc, self.seed
         base = L.arr
-        self.doc.push_pixels(L)
-        out = base
-        t = time.time()
-        for i, st in enumerate(self.stack):
+        steps = []
+        for st in self.stack:
             m = fx.get(st['effect'])
-            if not m:
-                continue
-            vals = effects.defaults(m)
-            vals.update({k: v for k, v in st['params'].items() if k in vals})
-            vals = self.px(m, vals, out.shape)
-            self.say('stack %d/%d: %s...' % (i + 1, len(self.stack), m.NAME))
-            QApplication.processEvents()
-            try:
-                out = np.ascontiguousarray(m.apply(out, vals, np.random.default_rng(self.seed + i)), np.uint8)
-            except Exception:
-                self.say('stack step %d (%s) failed: %s' % (i + 1, m.NAME, traceback.format_exc(limit=1).splitlines()[-1]))
-                L.arr = base
-                self.doc.undo.pop()
+            if m:
+                vals = effects.defaults(m)
+                vals.update({k: v for k, v in st['params'].items() if k in vals})
+                steps.append((m, self.px(m, vals, base.shape)))
+        mask = doc.mask[..., 3].copy() if doc.has_mask else None
+
+        def work():
+            out = base
+            for i, (m, vals) in enumerate(steps):
+                out = np.ascontiguousarray(m.apply(out, vals, np.random.default_rng(seed + i)), np.uint8)
+            return doc.masked_with(mask, base, out)
+
+        def done(out, dt):
+            if self.doc is not doc or L not in doc.layers:
                 return
-        L.arr = self.doc.masked(base, out)
-        self.fgen += 1
-        self.canvas.refresh()
-        self.touched()
-        self.say('stack done: %d steps in %.1fs%s' % (len(self.stack), time.time() - t,
-                                                      ' inside mask' if self.doc.has_mask else ''))
+            doc.push(('pixels', L, base))
+            L.arr = out
+            self.fgen += 1
+            self.canvas.refresh()
+            self.touched()
+            self.say('stack done: %d steps in %.1fs%s' % (len(steps), dt, ' inside mask' if mask is not None else ''))
+        self.run_bg('running the stack: %s' % ' > '.join(m.NAME for m, _ in steps), work, done)
 
     def save_stack(self):
         if not self.stack:
@@ -1721,6 +1782,7 @@ class Win(QMainWindow):
             return
         self.commit_preview()
         self.doc.active = self.row_layer(row)
+        self.prepare_filter_brush(300)
         self.opacity.blockSignals(True)
         self.opacity.setValue(int(self.doc.layer.opacity * 100))
         self.opacity.blockSignals(False)
@@ -1786,7 +1848,7 @@ class Win(QMainWindow):
 
     # ---------------------------------------------------------------- undo
     def undo(self):
-        if self.canvas.stroke or not self.doc:
+        if self.canvas.stroke or not self.doc or (self.bg is not None and self.bg.is_alive()):
             return
         if self.drop_preview():
             self.say('preview dropped')
@@ -1795,7 +1857,7 @@ class Win(QMainWindow):
             self.after_history('undo')
 
     def redo(self):
-        if self.canvas.stroke or not self.doc:
+        if self.canvas.stroke or not self.doc or (self.bg is not None and self.bg.is_alive()):
             return
         self.drop_preview()
         if self.doc.do_redo():
