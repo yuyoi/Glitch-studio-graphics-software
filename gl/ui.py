@@ -655,7 +655,11 @@ class Win(QMainWindow):
         self.preview_thread = None
         self.preview_pending = None
         self.preview_gen = 0
-        pt = QTimer(self); pt.timeout.connect(self.poll_preview); pt.start(40)
+        pt = QTimer(self); pt.timeout.connect(self.poll_preview); pt.start(30)
+        self.preview_px = 900                           # adapts to how fast the filter is (dynamic resolution)
+        self.refine_timer = QTimer(self)                # when the sliders rest: one full-size preview = exactly APPLY
+        self.refine_timer.setSingleShot(True)
+        self.refine_timer.timeout.connect(self.refine_preview)
         self.layer_timer = QTimer(self)
         self.layer_timer.setSingleShot(True)
         self.layer_timer.timeout.connect(lambda: self.canvas.refresh())
@@ -819,7 +823,7 @@ class Win(QMainWindow):
             it = QListWidgetItem(m.NAME.upper())
             it.setToolTip('[%s]  %s' % (m.CATEGORY, (m.__doc__ or '').strip()))
             self.filter_list.addItem(it)
-        self.filter_list.setFixedHeight(min(230, 24 * max(1, len(self.filters)) + 8))
+        self.filter_list.setFixedHeight(min(150, 24 * max(1, len(self.filters)) + 8))
         self.filter_list.currentRowChanged.connect(lambda i: 0 <= i < len(self.filters) and self.pick_filter(self.filters[i]))
         v.addWidget(self.filter_list)
         self.filter_params = Params(self.filter_changed)
@@ -838,7 +842,7 @@ class Win(QMainWindow):
         sv = QVBoxLayout(stab)
         sv.setContentsMargins(0, 4, 0, 0)
         sv.setSpacing(4)
-        self.tabs.addTab(stab, 'GLITCH STACK')
+        self.tabs.addTab(stab, 'STACK')
         sv.addWidget(QLabel('runs top to bottom = one undo.\n+STACK (FILTERS tab) adds steps.'))
         self.stack_list = QListWidget()
         sv.addWidget(self.stack_list, 1)
@@ -890,8 +894,12 @@ class Win(QMainWindow):
         self.play_timer = QTimer(self)
         self.play_timer.timeout.connect(self.next_frame)
 
-        v = outer
-        v.addWidget(sect('MASK  (effects stay inside)'))
+        mtab = QWidget()
+        v = QVBoxLayout(mtab)
+        v.setContentsMargins(0, 4, 0, 0)
+        v.setSpacing(4)
+        self.tabs.addTab(mtab, 'MASK')
+        v.addWidget(QLabel('filters, stacks and brushes stay inside\nthe mask (pink). M = paint it with any brush.'))
         row = QHBoxLayout()
         self.mask_btn = self.btn('PAINT MASK', self.toggle_mask_mode, 'M: brushes paint the mask (erase removes)', check=True)
         self.mask_btn.setObjectName('mask')
@@ -919,6 +927,8 @@ class Win(QMainWindow):
         row.addWidget(QLabel('TOL'))
         row.addWidget(self.mask_tol, 1)
         v.addLayout(row)
+        v.addStretch(1)
+        v = outer
         v.addSpacing(4)
         v.addWidget(sect('LAYERS'))
         self.layer_list = QListWidget()
@@ -992,7 +1002,8 @@ class Win(QMainWindow):
         elif getattr(self.filter, 'SLOW', False):
             self.say('%s is slow: press APPLY to run it' % self.filter.NAME)
         elif self.live_box.isChecked() and self.doc:
-            self.preview_timer.start(180)
+            self.refine_timer.stop()
+            self.preview_timer.start(60)
 
     def run_filter(self, src):
         return self.filter.apply(src, self.px(self.filter, self.params[self.filter.ID], src.shape),
@@ -1015,12 +1026,13 @@ class Win(QMainWindow):
             return
         self.start_preview(job)
 
-    def start_preview(self, job):
+    def start_preview(self, job, full=False):
         gen, m, params, seed, L = job
         base = self.live[1]
         h, w = base.shape[:2]
         auto = self.autoscale_btn.isChecked()
-        f = min(1.0, self.PREVIEW_PX / max(h, w)) if auto else 1.0
+        f = 1.0 if (full or not auto) else min(1.0, self.preview_px / max(h, w))
+        self.last_job = job
         small = anim.scaled(base, f) if f < 1 else base.copy()
         vals = self.px(m, params, small.shape)
         t0 = time.time()
@@ -1030,14 +1042,14 @@ class Win(QMainWindow):
                 res, err = np.ascontiguousarray(m.apply(small, vals, np.random.default_rng(seed)), np.uint8), None
             except Exception:
                 res, err = None, traceback.format_exc(limit=1).splitlines()[-1]
-            self.preview_q.put((gen, L, m.NAME, res, err, time.time() - t0, f < 1))
+            self.preview_q.put((gen, L, m.NAME, res, err, time.time() - t0, f < 1, full))
         self.preview_thread = threading.Thread(target=work, daemon=True)
         self.preview_thread.start()
         self.say('rendering %s preview...' % m.NAME)
 
     def poll_preview(self):
         while not self.preview_q.empty():
-            gen, L, name, res, err, dt, reduced = self.preview_q.get()
+            gen, L, name, res, err, dt, reduced, full = self.preview_q.get()
             if gen != self.preview_gen or self.live is None or self.live[0] is not L or not self.doc:
                 continue                                # stale: a newer slider position is on its way
             if err:
@@ -1048,17 +1060,36 @@ class Win(QMainWindow):
                 res = np.asarray(Image.fromarray(res).resize((base.shape[1], base.shape[0]), Image.NEAREST))
             L.arr = self.doc.masked(base, res)
             self.canvas.refresh()
+            if not full:                                # aim for ~0.15 s per preview: smaller when slow, bigger when fast
+                if dt > 0.22:
+                    self.preview_px = max(360, int(self.preview_px * 0.75))
+                elif dt < 0.08:
+                    self.preview_px = min(1600, int(self.preview_px * 1.2))
+                if reduced:
+                    self.refine_timer.start(450)
             self.say('%s preview (%.1fs%s)%s  APPLY keeps it (full size), Ctrl+Z drops it' %
-                     (name, dt, ', reduced size' if reduced else '', ' inside mask' if self.doc.has_mask else ''))
+                     (name, dt, ', reduced size: sharpens when you stop' if reduced else ', full size', ' inside mask' if self.doc.has_mask else ''))
         if self.preview_pending is not None and (self.preview_thread is None or not self.preview_thread.is_alive()):
             job, self.preview_pending = self.preview_pending, None
             if job[0] == self.preview_gen and self.live is not None:
                 self.start_preview(job)
 
+    def refine_preview(self):
+        """Sliders have rested: render the preview once at full size (same as APPLY) in the background."""
+        if self.live is None or self.preview_pending is not None or not self.filter:
+            return
+        if self.preview_thread is not None and self.preview_thread.is_alive():
+            self.refine_timer.start(200)
+            return
+        self.preview_gen += 1
+        job = (self.preview_gen, self.filter, dict(self.params[self.filter.ID]), self.seed, self.live[0])
+        self.start_preview(job, full=True)
+
     def drop_preview(self):
         """Throw a live preview away: the layer goes back to exactly what it was."""
         self.preview_gen += 1
         self.preview_pending = None
+        self.refine_timer.stop()
         if self.live is not None:
             L, base = self.live
             self.live = None

@@ -25,6 +25,36 @@ def P(key, label, lo=0, hi=1, default=None, step=None, choices=None):
                 step=step or (1 if is_int else (hi - lo) / 100), int=is_int)
 
 
+SHARP_PARAMS = [P('_sharp', 'SHARPEN AFTER (0 = off)', 0.0, 4.0, 0.0, 0.05),
+                P('_sradius', 'SHARPEN RADIUS px', 0.3, 8.0, 1.2, 0.1)]
+
+
+def unsharp(img, amount, radius):
+    """Unsharp mask on brightness only (no colour halos). No threshold, so high amounts cut right through a
+    filter's softness and go crunchy on purpose."""
+    from PIL import Image, ImageFilter
+    rgb = img[..., :3].astype(np.float32)
+    blur = np.asarray(Image.fromarray(np.ascontiguousarray(img[..., :3])).filter(ImageFilter.GaussianBlur(radius)))
+    detail = (rgb - blur.astype(np.float32)) @ np.array([0.299, 0.587, 0.114], np.float32)
+    out = img.copy()
+    out[..., :3] = np.clip(rgb + detail[..., None] * amount, 0, 255).astype(np.uint8)
+    return out
+
+
+def add_sharpen(m):
+    """Every filter gets SHARPEN AFTER built in (except Sharpen itself): it runs on the filter's own result."""
+    if m.KIND != 'filter' or m.ID == 'sharpen' or any(q['key'] == '_sharp' for q in m.PARAMS):
+        return
+    m.PARAMS = m.PARAMS + [dict(q) for q in SHARP_PARAMS]
+    raw = m.apply
+
+    def apply(img, p, rng, raw=raw):
+        out = raw(img, p, rng)
+        amt = p.get('_sharp', 0)
+        return unsharp(np.ascontiguousarray(out, np.uint8), amt, max(0.3, p.get('_sradius', 1.2))) if amt > 0 else out
+    m.apply = apply
+
+
 def load(folder):
     """Returns (effects list, errors list). A broken file never stops the app."""
     found, errors = [], []
@@ -41,6 +71,7 @@ def load(folder):
             m.ID = name
             m.PARAMS = list(getattr(m, 'PARAMS', []))
             m.CATEGORY = getattr(m, 'CATEGORY', 'Other')
+            add_sharpen(m)
             m.SCALE = px_keys(m)
             found.append(m)
         except Exception:

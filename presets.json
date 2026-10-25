@@ -128,5 +128,9 @@
  {"name": "Clean pixels (k-centroid)", "effect": "pixelart", "params": {"pixel": 6, "mode": "k-centroid"}},
  {"name": "16-colour sprite + outline", "effect": "pixelart", "params": {"pixel": 10, "mode": "pixel art", "colours": 16, "sprite": "dark"}},
  {"name": "Chunky 24px", "effect": "pixelart", "params": {"pixel": 24, "mode": "k-centroid", "colours": 12}},
- {"name": "Lost PS1 demo disc", "effect": "__stack__", "stack": [{"effect": "pixelart", "params": {"pixel": 4, "mode": "pixel art"}}, {"effect": "engine", "params": {"engine": "PlayStation", "scene": "poster room", "wobble": 0.8, "fog": 0.6}}]}
+ {"name": "Lost PS1 demo disc", "effect": "__stack__", "stack": [{"effect": "pixelart", "params": {"pixel": 4, "mode": "pixel art"}}, {"effect": "engine", "params": {"engine": "PlayStation", "scene": "poster room", "wobble": 0.8, "fog": 0.6}}]},
+ {"name": "Crisp", "effect": "sharpen", "params": {"amount": 1.0, "radius": 1.2, "threshold": 3, "mode": "luma only"}},
+ {"name": "Unblur (after VHS / N64)", "effect": "sharpen", "params": {"amount": 2.0, "radius": 2.0, "threshold": 2, "mode": "luma only"}},
+ {"name": "Razor", "effect": "sharpen", "params": {"amount": 3.0, "radius": 0.6, "threshold": 0, "mode": "all colours"}},
+ {"name": "Sharp Tape", "effect": "__stack__", "stack": [{"effect": "vhs", "params": {"jitter": 5, "bleed": 10, "bands": 2, "fade": 0.3}}, {"effect": "sharpen", "params": {"amount": 1.6, "radius": 1.5, "threshold": 3}}]}
 ]
