@@ -680,7 +680,8 @@ class Win(QMainWindow):
                          ('[', lambda: self.size_step(1 / 1.2)), (']', lambda: self.size_step(1.2)),
                          ('F', self.canvas.fit), ('1', self.zoom100), ('Ctrl+Return', self.apply_filter),
                          ('+', lambda: self.zoom_step(1.5)), ('=', lambda: self.zoom_step(1.5)),
-                         ('-', lambda: self.zoom_step(1 / 1.5)), ('M', self.toggle_mask_mode)):
+                         ('-', lambda: self.zoom_step(1 / 1.5)), ('M', self.toggle_mask_mode),
+                         ('Ctrl+L', lambda: self.rotate(1)), ('Ctrl+R', lambda: self.rotate(-1))):
             QShortcut(QKeySequence(keys), self, fn)
 
         self.load_presets()
@@ -717,6 +718,8 @@ class Win(QMainWindow):
                               ('ZOOM -', lambda: self.zoom_step(1 / 1.5), '-  (or mouse wheel / pinch)'),
                               ('ZOOM +', lambda: self.zoom_step(1.5), '+  (or mouse wheel / pinch)'),
                               ('FIT', self.canvas_fit, 'F'), ('1:1', self.zoom100, '1'),
+                              ('⟲ 90°', lambda: self.rotate(1), 'turn the picture 90 degrees left  (Ctrl+L)'),
+                              ('⟳ 90°', lambda: self.rotate(-1), 'turn the picture 90 degrees right  (Ctrl+R)'),
                               ('RELOAD FX', self.reload_fx, 'reload the effects folder (new effect files)')):
             if text is None:
                 h.addSpacing(16)
@@ -1863,7 +1866,21 @@ class Win(QMainWindow):
         if self.doc.do_redo():
             self.after_history('redo')
 
+    def rotate(self, k):
+        if not self.doc or self.canvas.stroke or (self.bg is not None and self.bg.is_alive()):
+            return
+        self.drop_preview()
+        self.doc.rotate(k)
+        self.doc.push(('rotate', k))
+        self.fgen += 1
+        self.canvas.set_doc(self.doc)                   # new size: new screen buffers, fit to view
+        self.sync_layers()
+        self.touched()
+        self.say('turned 90 degrees %s: now %dx%d' % ('left' if k > 0 else 'right', self.doc.w, self.doc.h))
+
     def after_history(self, what):
+        if self.canvas.img is None or (self.canvas.img.width(), self.canvas.img.height()) != (self.doc.w, self.doc.h):
+            self.canvas.set_doc(self.doc)               # an undone / redone turn changed the size
         self.fgen += 1
         self.sync_layers()
         self.canvas.refresh()

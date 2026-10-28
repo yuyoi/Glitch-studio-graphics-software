@@ -82,6 +82,18 @@ class Document:
     def push_mask(self):
         self.push(('mask', self.mask[..., 3].copy()))
 
+    def rotate(self, k):
+        """Turn the whole picture (every layer + the mask) by k quarter turns: +1 = 90 degrees left, -1 = right."""
+        for L in self.layers:
+            L.arr = np.ascontiguousarray(np.rot90(L.arr, k))
+        self.mask = np.ascontiguousarray(np.rot90(self.mask, k))
+        self.h, self.w = self.mask.shape[:2]
+        self.comp = np.zeros((self.h, self.w, 4), np.uint8)
+        self.overlay = np.zeros((self.h, self.w, 4), np.uint8)
+        self.overlay[..., 0], self.overlay[..., 1], self.overlay[..., 2] = 255, 40, 200
+        self.mask_changed()
+        self.composite()
+
     def mask_changed(self, rect=None):
         x0, y0, x1, y1 = rect or (0, 0, self.w, self.h)
         x0, y0, x1, y1 = max(0, int(x0)), max(0, int(y0)), min(self.w, int(x1)), min(self.h, int(y1))
@@ -120,6 +132,9 @@ class Document:
             if L in self.layers:
                 self.active = self.layers.index(L)
             return ('pixels', L, cur)
+        if entry[0] == 'rotate':                                  # undo a turn by turning back
+            self.rotate(-entry[1])
+            return ('rotate', -entry[1])
         _, layers, active = entry
         cur = ('stack', self.layers, self.active)
         self.layers, self.active = list(layers), active
